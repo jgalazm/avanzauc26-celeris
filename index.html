@@ -212,6 +212,18 @@
                         Upload Custom Configuration Files here:</a>
                     </html4f>                    
                     <div>
+                        <input type="file" id="folderInput" webkitdirectory style="display: none;" />
+                        <label for="folderInput" class="custom-file-upload-button">
+                            Load Experiment Folder (config.json + bathy.txt + waves.txt)
+                        </label>
+                        <br />
+                        <br />
+                        <html4f>
+                            ---------------------- <br>
+                            or, load individual files:
+                        </html4f>
+                        <br />
+                        <br />
                         <input type="file" id="configFile" accept="application/json" style="display: none;" />
                         <label for="configFile" class="custom-file-upload-button">
                             Load JSON Config File [Required]

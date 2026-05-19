@@ -3401,6 +3401,40 @@ document.addEventListener('DOMContentLoaded', function () {
         setTimeout(updateAllUIElements, delay);
     });
 
+    document.getElementById('folderInput').addEventListener('change', async function(e) {
+        const files = Array.from(e.target.files);
+        const find = name => files.find(f => f.name === name);
+
+        const configFile    = find('config.json');
+        const bathymetryFile = find('bathy.txt');
+        const waveFile      = find('waves.txt');
+        const overlayFile   = find('overlay.jpg');
+
+        if (!configFile || !bathymetryFile) {
+            alert("La carpeta debe contener config.json y bathy.txt.");
+            return;
+        }
+
+        calc_constants.run_example = -1;
+
+        const configContent     = await configFile.text();
+        const bathymetryContent = await bathymetryFile.text();
+
+        if (waveFile) {
+            const waveContent = await waveFile.text();
+            startSimulationWithWave(configContent, bathymetryContent, waveContent, overlayFile, undefined, undefined, undefined, undefined);
+        } else {
+            fetch('/no_waves.txt')
+                .then(r => r.text())
+                .then(defaultWaveContent => {
+                    startSimulationWithWave(configContent, bathymetryContent, defaultWaveContent, overlayFile, undefined, undefined, undefined, undefined);
+                })
+                .catch(error => console.error("Failed to load default wave file:", error));
+        }
+
+        setTimeout(updateAllUIElements, 5000);
+    });
+
     // run example simulation
 
     // Ensure to bind this function to your button's 'click' event in the HTML or here in the JS.
