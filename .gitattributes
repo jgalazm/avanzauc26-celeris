@@ -1,0 +1,4 @@
+textures/**/*.jpg filter=lfs diff=lfs merge=lfs -text
+textures/**/*.png filter=lfs diff=lfs merge=lfs -text
+skybox/**/*.png filter=lfs diff=lfs merge=lfs -text
+skybox/**/*.jpg filter=lfs diff=lfs merge=lfs -text
