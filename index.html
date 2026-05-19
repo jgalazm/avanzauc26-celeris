@@ -8,12 +8,17 @@
     <title>Celeris-WebGPU</title>
     <style>
         /* Add internal CSS here (or you could link to an external stylesheet) */
+        body {
+            overflow: hidden;
+            margin: 0;
+        }
+
         #main-container {
             width: 98vw; /* viewport width units make the container responsive to the full width of the screen */
             height: 100vh; /* viewport height units make it responsive to the height of the screen */
             display: flex;
             justify-content: flex-start;
-            overflow: visible; 
+            overflow: hidden;
             font-size: 14px; /* match the font size of your buttons */
             font-family: Courier, monospace;
         }
@@ -42,6 +47,7 @@
             width: 25%; /* Adjust based on your design and content */
             display: flex;
             flex-direction: column; /* stack the children vertically */
+            overflow-y: auto;
         }
 
         #verticalbar {
@@ -50,6 +56,7 @@
             width: 60%; /* Adjust based on your design and content */
             display: flex;
             flex-direction: column; /* stack the children vertically */
+            overflow: hidden;
         }
 
         #consolebar {
@@ -59,6 +66,7 @@
             width: 15%; /* Adjust based on your design and content */
             display: flex;
             flex-direction: column; /* stack the children vertically */
+            overflow-y: auto;
         }
 
         #log-container {
