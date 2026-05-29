@@ -2733,6 +2733,9 @@ document.addEventListener('DOMContentLoaded', function () {
         // 1) disable default handling immediately
         event.preventDefault();
 
+        // Ctrl+left and middle-mouse are reserved for 2D pan — skip canvas capture
+        if (event.button === 1 || (event.button === 0 && event.ctrlKey)) return;
+
         // 2) capture this pointer until it's released
         canvas.setPointerCapture(event.pointerId);
 
@@ -2764,7 +2767,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // Event listener for mousemove - if mouse is down, it's equivalent to multiple clicks
     canvas.addEventListener('pointermove', function (event) {
-        if (leftMouseIsDown && calc_constants.viewType == 1) {
+        if (leftMouseIsDown && calc_constants.viewType == 1 && !pan2DIsDown) {
             handleMouseEvent(event);
         } else if (leftMouseIsDown && calc_constants.viewType == 2) {
             const deltaX = event.clientX - lastMouseX_left;
@@ -2863,43 +2866,122 @@ document.addEventListener('DOMContentLoaded', function () {
     // end keyboard interaction
 
     // mouse scroll wheel interaction
-    const zoomSensitivity = 0.02;  // Adjust this value to make zoom faster or slower
+
+    // --- 3D explorer zoom (viewType == 2) ---
+    const zoomSensitivity = 0.02;
 
     function handleZoom(event) {
-        if (calc_constants.viewType !== 2) {
-            // If the current view type is not 2, do nothing (or optionally, remove the event listener here)
-            return;
-        }
-    
-        if (event.cancelable) {
-            event.preventDefault();
-        }
-    
+        if (calc_constants.viewType !== 2) return;
+        if (event.cancelable) event.preventDefault();
         calc_constants.click_update = 2;
-    
-        // Adjust the zoom level based on the wheel delta
         if (event.deltaY < 0) {
-            // Scrolling up, zoom in
             calc_constants.forward *= (1 - zoomSensitivity);
         } else if (event.deltaY > 0) {
-            // Scrolling down, zoom out
             calc_constants.forward *= (1 + zoomSensitivity);
         }
-    
-        // Clamp the zoom level to a minimum and maximum value
         calc_constants.forward = Math.max(0.001, Math.min(100, calc_constants.forward));
     }
 
     function updateZoomListener() {
         if (calc_constants.viewType == 2) {
-            // Add the zoom event listener only if viewType is 2
             canvas.addEventListener('wheel', handleZoom, { passive: false });
         } else {
-            // Remove the zoom event listener if viewType is not 2
             canvas.removeEventListener('wheel', handleZoom, { passive: false });
         }
     }
-    
+
+    // --- 2D scroll-to-zoom + pan (viewType == 1) ---
+    const canvasWrapper = document.getElementById('canvas-wrapper');
+
+    let zoom2D = 1.0;
+    let pan2DX = 0.0;
+    let pan2DY = 0.0;
+    let pan2DIsDown = false;
+    let pan2DLastX = 0;
+    let pan2DLastY = 0;
+
+    function applyZoom2D() {
+        canvasWrapper.style.transform = `translate(${pan2DX}px, ${pan2DY}px) scale(${zoom2D})`;
+    }
+
+    function clampPan2D() {
+        // keep at least 20% of the wrapper visible inside the parent
+        const parent = canvasWrapper.parentElement;
+        const parentW = parent.clientWidth;
+        const parentH = parent.clientHeight;
+        const wrapW = canvasWrapper.offsetWidth * zoom2D;
+        const wrapH = canvasWrapper.offsetHeight * zoom2D;
+        const minVisible = 0.2;
+        pan2DX = Math.min(pan2DX, parentW * (1 - minVisible));
+        pan2DX = Math.max(pan2DX, -(wrapW - parentW * minVisible));
+        pan2DY = Math.min(pan2DY, parentH * (1 - minVisible));
+        pan2DY = Math.max(pan2DY, -(wrapH - parentH * minVisible));
+    }
+
+    function resetZoom2D() {
+        zoom2D = 1.0;
+        pan2DX = 0.0;
+        pan2DY = 0.0;
+        canvasWrapper.style.transform = '';
+    }
+
+    canvasWrapper.addEventListener('wheel', (event) => {
+        if (calc_constants.viewType !== 1) return;
+        event.preventDefault();
+
+        const rect = canvasWrapper.getBoundingClientRect();
+        const cursorX = event.clientX - rect.left;
+        const cursorY = event.clientY - rect.top;
+
+        const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
+        const newZoom = Math.max(1.0, Math.min(8.0, zoom2D * factor));
+
+        // adjust pan so the point under the cursor stays fixed
+        pan2DX = cursorX + pan2DX - (cursorX / zoom2D) * newZoom;
+        pan2DY = cursorY + pan2DY - (cursorY / zoom2D) * newZoom;
+        zoom2D = newZoom;
+
+        if (zoom2D === 1.0) { pan2DX = 0; pan2DY = 0; }
+        clampPan2D();
+        applyZoom2D();
+    }, { passive: false });
+
+    // pan: middle-mouse or Ctrl+left-drag on the wrapper
+    canvasWrapper.addEventListener('pointerdown', (event) => {
+        if (calc_constants.viewType !== 1) return;
+        if (event.button === 1 || (event.button === 0 && event.ctrlKey)) {
+            event.preventDefault();
+            pan2DIsDown = true;
+            pan2DLastX = event.clientX;
+            pan2DLastY = event.clientY;
+            canvasWrapper.setPointerCapture(event.pointerId);
+        }
+    });
+
+    canvasWrapper.addEventListener('pointermove', (event) => {
+        if (!pan2DIsDown) return;
+        pan2DX += event.clientX - pan2DLastX;
+        pan2DY += event.clientY - pan2DLastY;
+        pan2DLastX = event.clientX;
+        pan2DLastY = event.clientY;
+        clampPan2D();
+        applyZoom2D();
+    });
+
+    canvasWrapper.addEventListener('pointerup', (event) => {
+        if (pan2DIsDown) {
+            pan2DIsDown = false;
+            canvasWrapper.releasePointerCapture(event.pointerId);
+        }
+    });
+
+    document.getElementById('reset-zoom-btn').addEventListener('click', resetZoom2D);
+
+    // reset 2D zoom when switching to 3D view
+    document.getElementById('viewType-select').addEventListener('change', function () {
+        if (parseInt(this.value) === 2) resetZoom2D();
+    });
+
     // end scroll wheel interaction
 
 
