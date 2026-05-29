@@ -181,6 +181,13 @@
             width: 100px;  /* Set the width of all input elements of type number */
         }
 
+        @keyframes pulse-red {
+            0%, 100% { opacity: 1; }
+            50%       { opacity: 0.3; }
+        }
+        #recording-status {
+            animation: pulse-red 1.2s ease-in-out infinite;
+        }
 
     </style>
 
@@ -1118,10 +1125,10 @@
                     <br />
                     <br />
                     <html4f>
-                    For long duration movies, it is recommended to use various screen capture options, such as the
-                    "Snipping Tool" in Windows.  Limitations of working within the browser / js environment make storing
-                    many frames and generating large animations challenging.  The options below will allow the user to make short animated gifs (up to ~100 frames)
-                    and to save up to 256 jpeg images.  Note that you can have only one of these operations ongoing at a time.
+                    Use the options below to export the simulation.
+                    WebM Video recording writes directly to disk with no frame limit (Chrome / Edge 94+ only).
+                    Animated GIF and JPEG stacks are capped at ~100 and 256 frames respectively.
+                    Note that you can have only one export operation ongoing at a time.
                     </html4f>
                     <br />
                     <br />
@@ -1173,6 +1180,26 @@
                     </html4f>
                     <br />
                     <button id="createJPGstack-button">Create JPEG stack</button>
+                    <br />
+                    <br />
+
+                    <html4f>WebM Video Recording Options:</html4f>
+                    <br />
+                    <html4f>
+                    Records the simulation canvas directly to a .webm file (VP9 codec).
+                    No frame limit — limited only by available disk space.
+                    Requires Chrome or Edge 94+. A Save-As dialog will appear on start.
+                    </html4f>
+                    <br />
+                    <br />
+                    <label for="recording-skip-input">Record every N render frames (1 = every frame, 2 = half frame rate, etc.):</label>
+                    <br />
+                    <input type="number" id="recording-skip-input" value="1" min="1" max="10" style="width: 60px;">
+                    <br />
+                    <br />
+                    <button id="start-recording-btn">Start Video Recording</button>
+                    <button id="stop-recording-btn" disabled>Stop Video Recording</button>
+                    <span id="recording-status" style="display:none; color:red; font-weight:bold; margin-left:8px;">&#9679; Recording</span>
                     <br />
                     <br />
 

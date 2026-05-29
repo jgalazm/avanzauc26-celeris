@@ -23,6 +23,8 @@
  *
  * Dependencies:
  *   webm-muxer  — expected at js/webm-muxer.js (local copy, see import below).
+ *   The file exports a single { WebMMuxer } named export containing Muxer and
+ *   FileSystemWritableFileStreamTarget as properties.
  *
  * Example (main.js):
  *   import { SimulationRecorder } from './streaming.js';
@@ -38,7 +40,7 @@
  *   recorder.addFrame(canvas);
  */
 
-import * as WebMMuxer from './webm-muxer.js';
+import { WebMMuxer } from './webm-muxer.js';
 
 export class SimulationRecorder {
 
@@ -55,6 +57,7 @@ export class SimulationRecorder {
     #fileStream = null;
     #rawFrameCount = 0;     // incremented on every addFrame() call
     #encodedFrameCount = 0; // incremented only when a frame is actually encoded
+    #subtitles = [];        // { videoUs, simTime } — one entry per encoded frame
 
     /**
      * Creates a recorder instance with the given encoding options.
@@ -114,6 +117,7 @@ export class SimulationRecorder {
         this.#state = 'initializing';
         this.#rawFrameCount = 0;
         this.#encodedFrameCount = 0;
+        this.#subtitles = [];
 
         // Throws AbortError if the user dismisses the dialog — propagate to caller.
         const fileHandle = await window.showSaveFilePicker({
@@ -169,10 +173,15 @@ export class SimulationRecorder {
      * Periodic flush: the encoder queue is flushed once per keyframe interval to push
      * data to disk incrementally and bound the encoder's internal queue size.
      *
-     * @param {HTMLCanvasElement} canvas  The canvas to capture. Should be the same element
-     *                                    passed to start().
+     * Subtitles: each encoded frame records { videoUs, simTime } for the SRT file written
+     * by stop(). The subtitle for a given frame spans from its video timestamp to the next
+     * frame's timestamp, showing the simulation time at the start of that interval.
+     *
+     * @param {HTMLCanvasElement} canvas    The canvas to capture.
+     * @param {number}            [simTime=0]  Current simulation time in seconds. Recorded
+     *                                         as a subtitle entry for the companion .srt file.
      */
-    addFrame(canvas) {
+    addFrame(canvas, simTime = 0) {
         if (this.#state !== 'recording') return;
 
         const raw = this.#rawFrameCount++;
@@ -182,6 +191,8 @@ export class SimulationRecorder {
         const timestamp = idx * this.#usPerFrame;
         const keyframeEveryN = this.#fps * this.#keyframeInterval;
         const keyFrame = (idx % keyframeEveryN) === 0;
+
+        this.#subtitles.push({ videoUs: timestamp, simTime });
 
         const frame = new VideoFrame(canvas, { timestamp });
         try {
@@ -195,6 +206,10 @@ export class SimulationRecorder {
         if (keyFrame && idx > 0) {
             this.#videoEncoder.flush();
         }
+
+        if (idx > 0 && idx % 100 === 0) {
+            console.log(`[Recording] ${idx} frames encoded.`);
+        }
     }
 
     /**
@@ -204,12 +219,14 @@ export class SimulationRecorder {
      *   1. Flush remaining frames from the encoder queue.
      *   2. Finalise the WebM container (writes duration and seek index headers).
      *   3. Close the file stream (commits bytes to the file system).
-     *   4. Null out all resources and return to 'idle'.
+     *   4. Build and trigger a browser download of the companion .srt subtitle file.
+     *   5. Null out all resources and return to 'idle'.
      *
      * After this resolves, start() can be called again for a new recording session.
      * Throws if called while not in 'recording' state.
      *
-     * @returns {Promise<void>}  Resolves once the file is fully written and closed.
+     * @returns {Promise<void>}  Resolves once the video file is written and the
+     *                           subtitle download has been triggered.
      */
     async stop() {
         if (this.#state !== 'recording') {
@@ -222,11 +239,60 @@ export class SimulationRecorder {
         this.#muxer.finalize();
         await this.#fileStream.close();
 
+        this.#downloadSrt();
+
         // Null all resources so the instance is clean for the next session.
         this.#videoEncoder = null;
         this.#muxer = null;
         this.#fileStream = null;
+        this.#subtitles = [];
 
         this.#state = 'idle';
+    }
+
+    /**
+     * Converts a video timestamp in microseconds to the SRT time format HH:MM:SS,mmm.
+     *
+     * @param  {number} us  Timestamp in microseconds.
+     * @returns {string}
+     */
+    #usToSrtTime(us) {
+        const ms   = Math.floor(us / 1000);
+        const h    = Math.floor(ms / 3_600_000);
+        const m    = Math.floor((ms % 3_600_000) / 60_000);
+        const s    = Math.floor((ms % 60_000) / 1_000);
+        const msec = ms % 1_000;
+        return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')},${String(msec).padStart(3,'0')}`;
+    }
+
+    /**
+     * Builds an SRT subtitle string from the accumulated frame log and triggers a
+     * browser download. Each subtitle entry spans from frame N's video timestamp to
+     * frame N+1's timestamp, labelled with the simulation time at frame N.
+     * The last frame uses one frame-duration as its display window.
+     */
+    #downloadSrt() {
+        if (this.#subtitles.length === 0) return;
+
+        let srt = '';
+        for (let i = 0; i < this.#subtitles.length; i++) {
+            const startUs = this.#subtitles[i].videoUs;
+            const endUs   = i + 1 < this.#subtitles.length
+                ? this.#subtitles[i + 1].videoUs
+                : startUs + this.#usPerFrame;
+            const simTime = this.#subtitles[i].simTime;
+
+            srt += `${i + 1}\n`;
+            srt += `${this.#usToSrtTime(startUs)} --> ${this.#usToSrtTime(endUs)}\n`;
+            srt += `Sim time: ${simTime.toFixed(2)} s\n\n`;
+        }
+
+        const blob = new Blob([srt], { type: 'text/plain' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
+        a.download = 'celeris-recording.srt';
+        a.click();
+        URL.revokeObjectURL(url);
     }
 }

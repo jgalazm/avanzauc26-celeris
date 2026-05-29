@@ -1,4 +1,5 @@
 ﻿// import source files
+import { SimulationRecorder } from './streaming.js';
 import { calc_constants, timeSeriesData, loadConfig, init_sim_parameters } from './constants_load_calc.js';  // variables and functions needed for init_sim_parameters
 import { loadDepthSurface, loadInitCondSurface, loadFrictionSurface, loadHardBottomSurface, loadWaveData, loadOverlay, CreateGoogleMapImage, calculateGoogleMapScaleAndOffset, loadImageBitmap, loadUserImage, loadCubeBitmaps} from './File_Loader.js';  // load depth surface and wave data file
 import { readTextureData, downloadTextureData, downloadObjectAsFile, handleFileSelect, loadJsonIntoCalcConstants, saveRenderedImageAsJPEG, saveSingleValueToFile, saveTextureSlicesAsImages, createAnimatedGifFromTexture, writeSurfaceData, sleep} from './File_Writer.js';  // load depth surface and wave data file
@@ -77,6 +78,9 @@ async function OrderedFunctions(configContent, bathymetryContent, waveContent) {
     calc_constants.numberOfWaves = numberOfWaves; 
     return { bathy2D, waveData };
 }
+
+// Module-level recorder instance — shared between the render loop and the UI button handlers
+let recorder = null;
 
 // This is an asynchronous function to set up and run the WebGPU context and resources.
 // All of the compute pipelines are included in this function
@@ -2307,7 +2311,10 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
 
         // Submit the recorded commands to the GPU for execution.
         device.queue.submit([commandEncoder.finish()]);
-        // end screen render    
+        // end screen render
+
+        // Capture frame for video recording if active (no-op when recorder is null)
+        if (recorder) recorder.addFrame(canvas, total_time);
 
         // for the tooltip & time series, extract pixel values
         if(calc_constants.updateTimeSeriesTx == 1 || calc_constants.chartDataUpdate == 1) {  // update the time series locations texture, and reset plot
@@ -3608,7 +3615,37 @@ document.addEventListener('DOMContentLoaded', function () {
     // Save time stack of jpgs
     document.getElementById('createJPGstack-button').addEventListener('click', function () {
         calc_constants.create_animation = 2;  //triggers save jpegs logic
-    });    
+    });
+
+    // WebM video recording
+    const startRecordingBtn  = document.getElementById('start-recording-btn');
+    const stopRecordingBtn   = document.getElementById('stop-recording-btn');
+    const recordingStatus    = document.getElementById('recording-status');
+
+    startRecordingBtn.addEventListener('click', async function () {
+        const skipFrames = parseInt(document.getElementById('recording-skip-input').value) || 1;
+        recorder = new SimulationRecorder({ fps: 30, skipFrames });
+        try {
+            await recorder.start(canvas);
+            startRecordingBtn.disabled    = true;
+            stopRecordingBtn.disabled     = false;
+            recordingStatus.style.display = 'inline';
+            console.log(`[Recording] Started — 30 fps, every ${skipFrames} render frame(s).`);
+        } catch (e) {
+            recorder = null;
+            if (e.name !== 'AbortError') console.error('[Recording] Failed to start:', e.message);
+        }
+    });
+
+    stopRecordingBtn.addEventListener('click', async function () {
+        stopRecordingBtn.disabled = true;  // prevent double-click while flushing
+        console.log('[Recording] Stop requested — flushing encoder and writing file...');
+        await recorder.stop();
+        recorder                      = null;
+        startRecordingBtn.disabled    = false;
+        recordingStatus.style.display = 'none';
+        console.log('[Recording] File saved successfully.');
+    });
 
     // Save baseline wave height surface
     document.getElementById('save-baseline-texture-btn').addEventListener('click', function () {
