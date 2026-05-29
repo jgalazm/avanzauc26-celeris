@@ -2969,6 +2969,189 @@ document.addEventListener('DOMContentLoaded', function () {
       tooltip.style.display = 'none';
     });
 
+    // --- Measuring tool ---
+    const measureCanvas = document.getElementById('measureCanvas');
+    const measureCtx = measureCanvas.getContext('2d');
+    const measureResult = document.getElementById('measure-result');
+    const measureBtn = document.getElementById('measure-tool-btn');
+
+    let measureActive = false;
+    let measureState = 'idle'; // 'idle' | 'waiting_p1' | 'waiting_p2'
+    let measureP1 = null; // { worldX, worldY }
+    let measureLastResult = null; // { p1, p2, dist } — kept for redraw
+
+    function syncMeasureCanvasSize() {
+        measureCanvas.width = canvas.width;
+        measureCanvas.height = canvas.height;
+    }
+
+    function worldToOverlayPx(worldX, worldY) {
+        const domW = calc_constants.WIDTH * calc_constants.dx || 1;
+        const domH = calc_constants.HEIGHT * calc_constants.dy || 1;
+        return {
+            px: (worldX / domW) * measureCanvas.width,
+            py: (1.0 - worldY / domH) * measureCanvas.height
+        };
+    }
+
+    function getWorldCoordsFromEvent(event) {
+        const bounds = canvas.getBoundingClientRect();
+        const normalizedX = (event.clientX - bounds.left) / (bounds.right - bounds.left);
+        const normalizedY = 1.0 - (event.clientY - bounds.top) / (bounds.bottom - bounds.top);
+        return {
+            worldX: normalizedX * calc_constants.WIDTH * calc_constants.dx,
+            worldY: normalizedY * calc_constants.HEIGHT * calc_constants.dy
+        };
+    }
+
+    function drawMeasureOverlay(livePx, livePy) {
+        measureCtx.clearRect(0, 0, measureCanvas.width, measureCanvas.height);
+
+        // draw persisted last result (faded) when waiting for next P1
+        if (measureLastResult && measureState === 'waiting_p1') {
+            const r1 = worldToOverlayPx(measureLastResult.p1.worldX, measureLastResult.p1.worldY);
+            const r2 = worldToOverlayPx(measureLastResult.p2.worldX, measureLastResult.p2.worldY);
+            measureCtx.globalAlpha = 0.45;
+            _drawLine(r1, r2, measureLastResult.dist);
+            measureCtx.globalAlpha = 1.0;
+        }
+
+        if (!measureP1) return;
+        const p1px = worldToOverlayPx(measureP1.worldX, measureP1.worldY);
+
+        // P1 dot
+        _drawDot(p1px.px, p1px.py, 'rgba(255, 80, 80, 0.9)');
+
+        if (livePx !== undefined) {
+            // rubber-band line to cursor
+            measureCtx.beginPath();
+            measureCtx.moveTo(p1px.px, p1px.py);
+            measureCtx.lineTo(livePx, livePy);
+            measureCtx.strokeStyle = 'rgba(255, 255, 80, 0.8)';
+            measureCtx.lineWidth = 2;
+            measureCtx.setLineDash([6, 4]);
+            measureCtx.stroke();
+            measureCtx.setLineDash([]);
+        }
+    }
+
+    function _drawDot(x, y, color) {
+        measureCtx.beginPath();
+        measureCtx.arc(x, y, 6, 0, Math.PI * 2);
+        measureCtx.fillStyle = color;
+        measureCtx.fill();
+        measureCtx.strokeStyle = 'white';
+        measureCtx.lineWidth = 1.5;
+        measureCtx.stroke();
+    }
+
+    function _drawLine(p1px, p2px, dist) {
+        measureCtx.beginPath();
+        measureCtx.moveTo(p1px.px, p1px.py);
+        measureCtx.lineTo(p2px.px, p2px.py);
+        measureCtx.strokeStyle = 'rgba(255, 255, 80, 0.85)';
+        measureCtx.lineWidth = 2;
+        measureCtx.setLineDash([6, 4]);
+        measureCtx.stroke();
+        measureCtx.setLineDash([]);
+
+        _drawDot(p1px.px, p1px.py, 'rgba(255, 80, 80, 0.9)');
+        _drawDot(p2px.px, p2px.py, 'rgba(80, 180, 255, 0.9)');
+
+        const label = `${dist.toFixed(1)} m`;
+        const midX = (p1px.px + p2px.px) / 2;
+        const midY = (p1px.py + p2px.py) / 2;
+        measureCtx.font = 'bold 14px Courier, monospace';
+        const tw = measureCtx.measureText(label).width;
+        measureCtx.fillStyle = 'rgba(0,0,0,0.65)';
+        measureCtx.fillRect(midX - tw / 2 - 4, midY - 16, tw + 8, 20);
+        measureCtx.fillStyle = 'white';
+        measureCtx.textAlign = 'center';
+        measureCtx.fillText(label, midX, midY);
+        measureCtx.textAlign = 'left';
+    }
+
+    function resetMeasureTool() {
+        measureActive = false;
+        measureState = 'idle';
+        measureP1 = null;
+        measureLastResult = null;
+        measureCtx.clearRect(0, 0, measureCanvas.width, measureCanvas.height);
+        measureCanvas.style.pointerEvents = 'none';
+        measureCanvas.style.cursor = 'default';
+        measureBtn.textContent = 'Measure Distance';
+        measureBtn.style.background = '';
+        measureBtn.style.color = '';
+        measureResult.style.display = 'none';
+    }
+
+    measureBtn.addEventListener('click', () => {
+        if (measureActive) {
+            resetMeasureTool();
+        } else {
+            syncMeasureCanvasSize();
+            measureActive = true;
+            measureState = 'waiting_p1';
+            measureP1 = null;
+            measureCtx.clearRect(0, 0, measureCanvas.width, measureCanvas.height);
+            measureCanvas.style.pointerEvents = 'auto';
+            measureCanvas.style.cursor = 'crosshair';
+            measureBtn.textContent = 'Cancel Measure';
+            measureBtn.style.background = '#d44';
+            measureBtn.style.color = 'white';
+        }
+    });
+
+    measureCanvas.addEventListener('click', (event) => {
+        if (!measureActive) return;
+        const coords = getWorldCoordsFromEvent(event);
+
+        if (measureState === 'waiting_p1') {
+            measureP1 = coords;
+            measureLastResult = null;
+            measureState = 'waiting_p2';
+            drawMeasureOverlay();
+        } else if (measureState === 'waiting_p2') {
+            const p2 = coords;
+            const dist = Math.sqrt(
+                Math.pow(p2.worldX - measureP1.worldX, 2) +
+                Math.pow(p2.worldY - measureP1.worldY, 2)
+            );
+            measureLastResult = { p1: measureP1, p2, dist };
+
+            const p1px = worldToOverlayPx(measureP1.worldX, measureP1.worldY);
+            const p2px = worldToOverlayPx(p2.worldX, p2.worldY);
+            measureCtx.clearRect(0, 0, measureCanvas.width, measureCanvas.height);
+            _drawLine(p1px, p2px, dist);
+
+            measureResult.innerHTML =
+                `<b>P1:</b> x=${measureP1.worldX.toFixed(1)} m, y=${measureP1.worldY.toFixed(1)} m<br>` +
+                `<b>P2:</b> x=${p2.worldX.toFixed(1)} m, y=${p2.worldY.toFixed(1)} m<br>` +
+                `<b>Distance: ${dist.toFixed(2)} m</b>`;
+            measureResult.style.display = 'block';
+
+            measureP1 = null;
+            measureState = 'waiting_p1';
+        }
+    });
+
+    measureCanvas.addEventListener('mousemove', (event) => {
+        if (!measureActive || measureState !== 'waiting_p2' || !measureP1) return;
+        const bounds = canvas.getBoundingClientRect();
+        const scaleX = measureCanvas.width / (bounds.right - bounds.left);
+        const scaleY = measureCanvas.height / (bounds.bottom - bounds.top);
+        const livePx = (event.clientX - bounds.left) * scaleX;
+        const livePy = (event.clientY - bounds.top) * scaleY;
+        drawMeasureOverlay(livePx, livePy);
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && measureActive) {
+            resetMeasureTool();
+        }
+    });
+    // --- End measuring tool ---
+
     // html input fields
     // Define a helper function to update calc_constants and potentially re-initialize components
     function updateCalcConstants(property, newValue) {
