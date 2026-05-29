@@ -353,7 +353,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     // Incoming Waves
     // west boundary
-    if (globals.west_boundary_type == 2 && idx.x <= 2) {
+    if (globals.west_boundary_type == 2 && idx.x <= 200) {
         if (globals.incident_wave_type <= 2) { // Sine Waves
             let iBC = 1;
             let jBC = 1;
