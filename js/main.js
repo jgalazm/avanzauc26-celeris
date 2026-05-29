@@ -79,8 +79,10 @@ async function OrderedFunctions(configContent, bathymetryContent, waveContent) {
     return { bathy2D, waveData };
 }
 
-// Module-level recorder instance — shared between the render loop and the UI button handlers
+// Module-level recorder state — shared between the render loop and the UI button handlers
 let recorder = null;
+let recordingStartSimTime = null; // sim time (s) when the current recording began
+let autoStopTriggered = false;    // guard against triggering auto-stop more than once
 
 // This is an asynchronous function to set up and run the WebGPU context and resources.
 // All of the compute pipelines are included in this function
@@ -2314,7 +2316,23 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
         // end screen render
 
         // Capture frame for video recording if active (no-op when recorder is null)
-        if (recorder) recorder.addFrame(canvas, total_time);
+        if (recorder) {
+            recorder.addFrame(canvas, total_time);
+
+            // Latch the simulation time of the very first recorded frame
+            if (recordingStartSimTime === null) recordingStartSimTime = total_time;
+
+            // Auto-stop check
+            if (!autoStopTriggered &&
+                document.getElementById('recording-stop-mode').value === 'auto') {
+                const dur = parseFloat(document.getElementById('recording-autostop-input').value);
+                if (!isNaN(dur) && dur > 0 && (total_time - recordingStartSimTime) >= dur) {
+                    autoStopTriggered = true;
+                    console.log(`[Recording] Auto-stop triggered at sim time ${total_time.toFixed(2)} s.`);
+                    document.getElementById('stop-recording-btn').click();
+                }
+            }
+        }
 
         // for the tooltip & time series, extract pixel values
         if(calc_constants.updateTimeSeriesTx == 1 || calc_constants.chartDataUpdate == 1) {  // update the time series locations texture, and reset plot
@@ -3618,6 +3636,11 @@ document.addEventListener('DOMContentLoaded', function () {
     });
 
     // WebM video recording
+    document.getElementById('recording-stop-mode').addEventListener('change', function () {
+        document.getElementById('recording-autostop-row').style.display =
+            this.value === 'auto' ? 'block' : 'none';
+    });
+
     const startRecordingBtn  = document.getElementById('start-recording-btn');
     const stopRecordingBtn   = document.getElementById('stop-recording-btn');
     const recordingStatus    = document.getElementById('recording-status');
@@ -3627,10 +3650,15 @@ document.addEventListener('DOMContentLoaded', function () {
         recorder = new SimulationRecorder({ fps: 30, skipFrames });
         try {
             await recorder.start(canvas);
+            recordingStartSimTime = null; // will be set on the first frame
+            autoStopTriggered     = false;
             startRecordingBtn.disabled    = true;
             stopRecordingBtn.disabled     = false;
             recordingStatus.style.display = 'inline';
-            console.log(`[Recording] Started — 30 fps, every ${skipFrames} render frame(s).`);
+            const modeLabel = document.getElementById('recording-stop-mode').value === 'auto'
+                ? `, auto-stop after ${document.getElementById('recording-autostop-input').value} sim-s`
+                : ', manual stop';
+            console.log(`[Recording] Started — 30 fps, every ${skipFrames} render frame(s)${modeLabel}.`);
         } catch (e) {
             recorder = null;
             if (e.name !== 'AbortError') console.error('[Recording] Failed to start:', e.message);

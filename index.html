@@ -1197,6 +1197,18 @@
                     <input type="number" id="recording-skip-input" value="1" min="1" max="10" style="width: 60px;">
                     <br />
                     <br />
+                    <label for="recording-stop-mode">Stop mode:</label>
+                    <select id="recording-stop-mode">
+                        <option value="manual">Manual (use Stop button)</option>
+                        <option value="auto">After X simulated seconds</option>
+                    </select>
+                    <br />
+                    <div id="recording-autostop-row" style="display:none; margin-top:4px;">
+                        <label for="recording-autostop-input">Stop after (simulated seconds):</label>
+                        <br />
+                        <input type="number" id="recording-autostop-input" value="60" min="1" style="width: 80px;">
+                    </div>
+                    <br />
                     <button id="start-recording-btn">Start Video Recording</button>
                     <button id="stop-recording-btn" disabled>Stop Video Recording</button>
                     <span id="recording-status" style="display:none; color:red; font-weight:bold; margin-left:8px;">&#9679; Recording</span>
