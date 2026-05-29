@@ -824,7 +824,7 @@ fn fs_main(@location(1) uv: vec2<f32>) -> FragmentOutput {
     }
 
     // Add colorbar
-    if (globals.CB_show == 1  && (photorealistic == 0  || uv.y > 0.8) ) {
+    if (globals.CB_show == 10  && (photorealistic == 0  || uv.y > 0.8) ) {
         let colorbar_LL = vec2<f32>(globals.CB_xstart_uv, 0.0);
         let colorbar_width = globals.CB_width_uv;
         let colorbar_height = f32(globals.CB_ystart + 20) / f32(globals.HEIGHT) * grid_ratio; // 20 pixels above tick marks
