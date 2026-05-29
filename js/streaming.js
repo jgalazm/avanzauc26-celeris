@@ -60,6 +60,16 @@ export class SimulationRecorder {
     #subtitles = [];        // { videoUs, simTime } — one entry per encoded frame
 
     /**
+     * Optional callback invoked during stop() to report save progress.
+     * Receives { phase: 'encoding'|'writing', progress: 0–1, framesLeft: number }.
+     * 'encoding' fires repeatedly as the encoder drains its queue.
+     * 'writing'  fires once when the encoder is done and the file stream is closing.
+     * Set to null to disable.
+     */
+    #onSavingProgress = null;
+    set onSavingProgress(cb) { this.#onSavingProgress = cb; }
+
+    /**
      * Creates a recorder instance with the given encoding options.
      * Does not open any dialogs or allocate any GPU resources — call start() for that.
      *
@@ -235,7 +245,29 @@ export class SimulationRecorder {
 
         this.#state = 'stopping';
 
-        await this.#videoEncoder.flush();
+        // Snapshot the encoder queue depth at the moment stop() is called.
+        // encodeQueueSize = frames submitted but not yet output as encoded chunks.
+        // If the periodic flushes kept up, this may already be 0.
+        const pendingAtStop = this.#videoEncoder.encodeQueueSize;
+
+        if (pendingAtStop > 0 && this.#onSavingProgress) {
+            // 'dequeue' fires each time the encoder finishes one or more queued frames.
+            const onDequeue = () => {
+                const remaining = this.#videoEncoder.encodeQueueSize;
+                const progress  = 1 - remaining / pendingAtStop;
+                this.#onSavingProgress({ phase: 'encoding', progress, framesLeft: remaining });
+            };
+            this.#videoEncoder.addEventListener('dequeue', onDequeue);
+            await this.#videoEncoder.flush();
+            this.#videoEncoder.removeEventListener('dequeue', onDequeue);
+        } else {
+            await this.#videoEncoder.flush();
+        }
+
+        // fileStream.close() has no progress signal — notify caller that we've moved
+        // on to the write phase so the UI can show a distinct state.
+        this.#onSavingProgress?.({ phase: 'writing', progress: 1, framesLeft: 0 });
+
         this.#muxer.finalize();
         await this.#fileStream.close();
 

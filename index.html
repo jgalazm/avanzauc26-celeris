@@ -185,8 +185,17 @@
             0%, 100% { opacity: 1; }
             50%       { opacity: 0.3; }
         }
+        @keyframes pulse-orange {
+            0%, 100% { opacity: 1; }
+            50%       { opacity: 0.2; }
+        }
         #recording-status {
+            color: red;
             animation: pulse-red 1.2s ease-in-out infinite;
+        }
+        #recording-status.stopping {
+            color: darkorange;
+            animation: pulse-orange 2s ease-in-out infinite;
         }
 
     </style>
@@ -1211,7 +1220,7 @@
                     <br />
                     <button id="start-recording-btn">Start Video Recording</button>
                     <button id="stop-recording-btn" disabled>Stop Video Recording</button>
-                    <span id="recording-status" style="display:none; color:red; font-weight:bold; margin-left:8px;">&#9679; Recording</span>
+                    <span id="recording-status" style="display:none; font-weight:bold; margin-left:8px;">&#9679; Recording</span>
                     <br />
                     <br />
 

@@ -3667,11 +3667,31 @@ document.addEventListener('DOMContentLoaded', function () {
 
     stopRecordingBtn.addEventListener('click', async function () {
         stopRecordingBtn.disabled = true;  // prevent double-click while flushing
+
+        // Transition indicator to "stopping" state
+        recordingStatus.textContent = '● Flushing…';
+        recordingStatus.classList.add('stopping');
         console.log('[Recording] Stop requested — flushing encoder and writing file...');
+
+        // Update the indicator as the encoder drains its queue
+        recorder.onSavingProgress = ({ phase, progress, framesLeft }) => {
+            if (phase === 'encoding') {
+                const pct = Math.round(progress * 100);
+                recordingStatus.textContent = `● Flushing… ${pct}%`;
+                if (framesLeft === 0) console.log('[Recording] Encoder flushed — writing file...');
+            } else if (phase === 'writing') {
+                recordingStatus.textContent = '● Writing file…';
+            }
+        };
+
         await recorder.stop();
-        recorder                      = null;
-        startRecordingBtn.disabled    = false;
+        recorder = null;
+
+        // Reset indicator and hide it
+        recordingStatus.textContent = '● Recording';
+        recordingStatus.classList.remove('stopping');
         recordingStatus.style.display = 'none';
+        startRecordingBtn.disabled    = false;
         console.log('[Recording] File saved successfully.');
     });
 
