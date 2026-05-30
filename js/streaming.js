@@ -153,12 +153,34 @@ export class SimulationRecorder {
             error: (e) => console.error('[SimulationRecorder] encoder error:', e),
         });
 
-        this.#videoEncoder.configure({
+        // Prefer hardware acceleration and realtime latency mode for faster encoding.
+        // latencyMode:'realtime' reduces encoder lookahead so frames are output immediately,
+        // keeping the queue shallow and making the final flush at stop() faster.
+        // hardwareAcceleration:'prefer-hardware' uses a GPU encoder (Intel QSV, NVIDIA NVENC,
+        // AMD VCE) if one is available; falls back to software silently if not.
+        const encoderConfig = {
             codec: 'vp09.00.10.08',
             width: canvas.width,
             height: canvas.height,
             framerate: this.#fps,
-        });
+            latencyMode: 'realtime',
+            hardwareAcceleration: 'prefer-hardware',
+        };
+
+        // Check support and log what the browser will actually use.
+        const support = await VideoEncoder.isConfigSupported(encoderConfig);
+        if (!support.supported) {
+            // Fall back to software with no acceleration hints if the config is rejected.
+            console.warn('[Recording] Preferred encoder config not supported — falling back to software VP9.');
+            encoderConfig.hardwareAcceleration = 'prefer-software';
+            encoderConfig.latencyMode = 'quality';
+        } else {
+            const hw = support.config?.hardwareAcceleration ?? 'unknown';
+            const hwLabel = hw === 'prefer-hardware' ? 'hardware-accelerated' : 'software';
+            console.log(`[Recording] Encoder: VP9, ${hwLabel}, realtime latency mode.`);
+        }
+
+        this.#videoEncoder.configure(encoderConfig);
 
         this.#state = 'recording';
     }

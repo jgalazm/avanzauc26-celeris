@@ -1482,6 +1482,7 @@
                 <span><center>  Simulation Window  </center></span>
                 <button id="reset-zoom-btn" style="margin-right: 8px; font-size: 12px; font-family: Courier, monospace; padding: 2px 6px;">Reset Zoom</button>
                 <button id="measure-tool-btn" style="margin-right: 8px; font-size: 12px; font-family: Courier, monospace; padding: 2px 6px;">Measure Distance</button>
+                <button id="pause-toggle-btn" style="margin-right: 8px; font-size: 12px; font-family: Courier, monospace; padding: 2px 8px; font-weight: bold;">&#9646;&#9646; Pause</button>
                 <button class="minimize-button">-</button>
             </div>
             <div class="window-content">
@@ -1569,6 +1570,27 @@
 
     <!-- Wave solution control script - everything runs from this -->
     <script type="module" src="js/main.js"></script>
+
+    <script>
+    (function () {
+        var btn = document.getElementById('pause-toggle-btn');
+        var sel = document.getElementById('simPause-select');
+        var paused = false;
+        btn.addEventListener('click', function () {
+            paused = !paused;
+            if (paused) {
+                sel.value = '1';
+                btn.innerHTML = '&#9654; Resume';
+                btn.style.color = 'darkorange';
+            } else {
+                sel.value = '-1';
+                btn.innerHTML = '&#9646;&#9646; Pause';
+                btn.style.color = '';
+            }
+            sel.dispatchEvent(new Event('change'));
+        });
+    })();
+    </script>
  
     
 </body>
