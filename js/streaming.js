@@ -150,37 +150,78 @@ export class SimulationRecorder {
 
         this.#videoEncoder = new VideoEncoder({
             output: (chunk, meta) => this.#muxer.addVideoChunk(chunk, meta),
-            error: (e) => console.error('[SimulationRecorder] encoder error:', e),
+            error: (e) => {
+                console.error('[SimulationRecorder] encoder error:', e);
+                // Mark the recorder as broken so addFrame() stops submitting work
+                // to a closed encoder, which would throw InvalidStateError.
+                this.#state = 'idle';
+            },
         });
 
-        // Prefer hardware acceleration and realtime latency mode for faster encoding.
-        // latencyMode:'realtime' reduces encoder lookahead so frames are output immediately,
-        // keeping the queue shallow and making the final flush at stop() faster.
-        // hardwareAcceleration:'prefer-hardware' uses a GPU encoder (Intel QSV, NVIDIA NVENC,
-        // AMD VCE) if one is available; falls back to software silently if not.
-        const encoderConfig = {
-            codec: 'vp09.00.10.08',
-            width: canvas.width,
-            height: canvas.height,
-            framerate: this.#fps,
-            latencyMode: 'realtime',
-            hardwareAcceleration: 'prefer-hardware',
-        };
+        // Candidate configs tried in order. VP9 Level 4.1 (codec string '41') supports
+        // up to ~2160p @ 30 fps — a safe upper bound for any simulation canvas.
+        // The previous level '10' (Level 1.0) capped at ~256×144 and caused
+        // "Encoder initialization error" on any realistically sized canvas.
+        const candidateConfigs = [
+            {
+                codec: 'vp09.00.41.08',
+                width: canvas.width,
+                height: canvas.height,
+                framerate: this.#fps,
+                latencyMode: 'realtime',
+                hardwareAcceleration: 'prefer-hardware',
+            },
+            {
+                codec: 'vp09.00.41.08',
+                width: canvas.width,
+                height: canvas.height,
+                framerate: this.#fps,
+                latencyMode: 'quality',
+                hardwareAcceleration: 'prefer-software',
+            },
+            {
+                codec: 'vp8',
+                width: canvas.width,
+                height: canvas.height,
+                framerate: this.#fps,
+                latencyMode: 'realtime',
+            },
+        ];
 
-        // Check support and log what the browser will actually use.
-        const support = await VideoEncoder.isConfigSupported(encoderConfig);
-        if (!support.supported) {
-            // Fall back to software with no acceleration hints if the config is rejected.
-            console.warn('[Recording] Preferred encoder config not supported — falling back to software VP9.');
-            encoderConfig.hardwareAcceleration = 'prefer-software';
-            encoderConfig.latencyMode = 'quality';
-        } else {
-            const hw = support.config?.hardwareAcceleration ?? 'unknown';
-            const hwLabel = hw === 'prefer-hardware' ? 'hardware-accelerated' : 'software';
-            console.log(`[Recording] Encoder: VP9, ${hwLabel}, realtime latency mode.`);
+        let encoderConfig = null;
+        for (const cfg of candidateConfigs) {
+            const support = await VideoEncoder.isConfigSupported(cfg);
+            if (support.supported) {
+                encoderConfig = cfg;
+                break;
+            }
+        }
+        if (!encoderConfig) {
+            await this.#fileStream.close();
+            this.#fileStream = null;
+            this.#muxer = null;
+            this.#videoEncoder = null;
+            this.#state = 'idle';
+            throw new Error('[Recording] No supported VideoEncoder configuration found in this browser.');
         }
 
+        console.log(`[Recording] Encoder: ${encoderConfig.codec}, hw=${encoderConfig.hardwareAcceleration ?? 'default'}, latency=${encoderConfig.latencyMode}.`);
         this.#videoEncoder.configure(encoderConfig);
+
+        // Awaiting flush() right after configure() confirms that the encoder actually
+        // initialised successfully. If configure() failed asynchronously the flush
+        // promise rejects, letting us propagate the error to the caller cleanly
+        // instead of leaving the recorder stuck in 'recording' with a dead encoder.
+        try {
+            await this.#videoEncoder.flush();
+        } catch (e) {
+            await this.#fileStream.close();
+            this.#fileStream = null;
+            this.#muxer = null;
+            this.#videoEncoder = null;
+            this.#state = 'idle';
+            throw new Error(`[Recording] VideoEncoder failed to initialise: ${e.message}`);
+        }
 
         this.#state = 'recording';
     }
