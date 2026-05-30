@@ -158,55 +158,12 @@ export class SimulationRecorder {
             },
         });
 
-        // Candidate configs tried in order. VP9 Level 4.1 (codec string '41') supports
-        // up to ~2160p @ 30 fps — a safe upper bound for any simulation canvas.
-        // The previous level '10' (Level 1.0) capped at ~256×144 and caused
-        // "Encoder initialization error" on any realistically sized canvas.
-        const candidateConfigs = [
-            {
-                codec: 'vp09.00.41.08',
-                width: canvas.width,
-                height: canvas.height,
-                framerate: this.#fps,
-                latencyMode: 'realtime',
-                hardwareAcceleration: 'prefer-hardware',
-            },
-            {
-                codec: 'vp09.00.41.08',
-                width: canvas.width,
-                height: canvas.height,
-                framerate: this.#fps,
-                latencyMode: 'quality',
-                hardwareAcceleration: 'prefer-software',
-            },
-            {
-                codec: 'vp8',
-                width: canvas.width,
-                height: canvas.height,
-                framerate: this.#fps,
-                latencyMode: 'realtime',
-            },
-        ];
-
-        let encoderConfig = null;
-        for (const cfg of candidateConfigs) {
-            const support = await VideoEncoder.isConfigSupported(cfg);
-            if (support.supported) {
-                encoderConfig = cfg;
-                break;
-            }
-        }
-        if (!encoderConfig) {
-            await this.#fileStream.close();
-            this.#fileStream = null;
-            this.#muxer = null;
-            this.#videoEncoder = null;
-            this.#state = 'idle';
-            throw new Error('[Recording] No supported VideoEncoder configuration found in this browser.');
-        }
-
-        console.log(`[Recording] Encoder: ${encoderConfig.codec}, hw=${encoderConfig.hardwareAcceleration ?? 'default'}, latency=${encoderConfig.latencyMode}.`);
-        this.#videoEncoder.configure(encoderConfig);
+        this.#videoEncoder.configure({
+            codec: 'vp09.00.10.08',
+            width: canvas.width,
+            height: canvas.height,
+            framerate: this.#fps,
+        });
 
         // Awaiting flush() right after configure() confirms that the encoder actually
         // initialised successfully. If configure() failed asynchronously the flush
