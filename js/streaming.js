@@ -344,7 +344,12 @@ export class SimulationRecorder {
         const a    = document.createElement('a');
         a.href     = url;
         a.download = 'celeris-recording.srt';
+        // Anchor must be in the document for Chrome to honour the download attribute,
+        // and the URL must not be revoked until after the browser has fetched it.
+        document.body.appendChild(a);
         a.click();
-        URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        console.log(`[Recording] Subtitle file saved: ${a.download}`);
     }
 }
