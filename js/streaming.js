@@ -19,7 +19,9 @@
  * Reusability: after stop() resolves the instance returns to 'idle' and start() can be
  * called again for a new session without reloading the page.
  *
- * Browser requirements: Chrome / Edge 94+ (VideoEncoder, showSaveFilePicker).
+ * Browser requirements: Chrome / Edge 94+ (VideoEncoder, File System Access API).
+ * The caller supplies a FileSystemDirectoryHandle (e.g. from showDirectoryPicker)
+ * and a base name; this class writes <base>.webm / .srt / .json into that directory.
  *
  * Dependencies:
  *   webm-muxer  — expected at js/webm-muxer.js (local copy, see import below).
@@ -30,8 +32,9 @@
  *   import { SimulationRecorder } from './streaming.js';
  *   const recorder = new SimulationRecorder({ fps: 30, skipFrames: 1 });
  *
+ *   const dir = await window.showDirectoryPicker({ mode: 'readwrite' });
  *   startBtn.addEventListener('click', async () => {
- *       try { await recorder.start(canvas); }
+ *       try { await recorder.start(canvas, { dirHandle: dir, baseName: 'photo' }); }
  *       catch (e) { if (e.name !== 'AbortError') console.error(e); }
  *   });
  *   stopBtn.addEventListener('click', () => recorder.stop());
@@ -58,6 +61,12 @@ export class SimulationRecorder {
     #rawFrameCount = 0;     // incremented on every addFrame() call
     #encodedFrameCount = 0; // incremented only when a frame is actually encoded
     #subtitles = [];        // { videoUs, simTime } — one entry per encoded frame
+
+    // Output destination — a caller-chosen directory plus a base name. All files for
+    // one session (<base>.webm, <base>.srt, optional <base>.json) are written here.
+    #dirHandle = null;
+    #baseName = 'recording';
+    #metadata = null;       // optional plain object → written as <base>.json on stop()
 
     /**
      * Optional callback invoked during stop() to report save progress.
@@ -97,43 +106,46 @@ export class SimulationRecorder {
     get isRecording() { return this.#state === 'recording'; }
 
     /**
-     * Opens the browser's native Save-As dialog, initialises the muxer and video encoder,
-     * and transitions to 'recording' so that addFrame() calls start being encoded.
+     * Creates <base>.webm in the supplied directory, initialises the muxer and video
+     * encoder, and transitions to 'recording' so that addFrame() calls start encoding.
      *
      * Error handling:
-     *   - Throws DOMException { name: 'AbortError' } if the user cancels the dialog.
-     *     Callers should catch this and treat it as a silent no-op, not an error.
-     *   - Throws Error with a readable message if VideoEncoder or showSaveFilePicker are
-     *     not available in the current browser.
+     *   - Throws Error if no `dirHandle` is supplied, or if VideoEncoder is unavailable.
      *   - Throws if called while not in 'idle' state (prevents double-start).
      *
-     * @param  {HTMLCanvasElement} canvas  The canvas whose frames will be recorded.
-     *                                     Width and height are read once here and fixed
-     *                                     for the duration of the recording.
+     * @param  {HTMLCanvasElement|OffscreenCanvas} canvas  The canvas whose frames will be
+     *                                     recorded. Width and height are read once here and
+     *                                     fixed for the duration of the recording.
+     * @param  {object} options
+     * @param  {FileSystemDirectoryHandle} options.dirHandle  Directory to write all files into.
+     * @param  {string} [options.baseName='recording']  Base filename (no extension).
+     * @param  {object|null} [options.metadata=null]  If set, written as <base>.json on stop().
      * @returns {Promise<void>}            Resolves when the encoder is configured and
      *                                     the recorder is ready to accept frames.
      */
-    async start(canvas) {
+    async start(canvas, { dirHandle, baseName = 'recording', metadata = null } = {}) {
         if (this.#state !== 'idle') {
             throw new Error(`Cannot start: recorder is currently '${this.#state}'.`);
         }
         if (typeof VideoEncoder === 'undefined') {
             throw new Error('VideoEncoder API not supported (requires Chrome / Edge 94+).');
         }
-        if (typeof showSaveFilePicker === 'undefined') {
-            throw new Error('File System Access API not supported (requires Chrome / Edge 86+).');
+        if (!dirHandle) {
+            throw new Error('start() requires a FileSystemDirectoryHandle (dirHandle option).');
         }
 
         this.#state = 'initializing';
         this.#rawFrameCount = 0;
         this.#encodedFrameCount = 0;
         this.#subtitles = [];
+        this.#dirHandle = dirHandle;
+        this.#baseName = baseName;
+        this.#metadata = metadata;
 
-        // Throws AbortError if the user dismisses the dialog — propagate to caller.
-        const fileHandle = await window.showSaveFilePicker({
-            suggestedName: 'celeris-recording.webm',
-            types: [{ description: 'WebM Video', accept: { 'video/webm': ['.webm'] } }],
-        });
+        // Create (or truncate) <base>.webm inside the caller-chosen directory and open
+        // it for streaming writes — the picker itself is hoisted to the caller so a
+        // single directory can hold several recordings (e.g. photo + data).
+        const fileHandle = await dirHandle.getFileHandle(`${baseName}.webm`, { create: true });
         this.#fileStream = await fileHandle.createWritable();
 
         // The muxer writes encoded chunks straight to the file stream as they arrive,
@@ -291,13 +303,16 @@ export class SimulationRecorder {
         this.#muxer.finalize();
         await this.#fileStream.close();
 
-        this.#downloadSrt();
+        // Write the companion .srt (and optional .json) into the same directory.
+        await this.#writeSidecars();
 
         // Null all resources so the instance is clean for the next session.
         this.#videoEncoder = null;
         this.#muxer = null;
         this.#fileStream = null;
         this.#subtitles = [];
+        this.#dirHandle = null;
+        this.#metadata = null;
 
         this.#state = 'idle';
     }
@@ -318,38 +333,46 @@ export class SimulationRecorder {
     }
 
     /**
-     * Builds an SRT subtitle string from the accumulated frame log and triggers a
-     * browser download. Each subtitle entry spans from frame N's video timestamp to
-     * frame N+1's timestamp, labelled with the simulation time at frame N.
-     * The last frame uses one frame-duration as its display window.
+     * Writes the companion sidecar files into the session directory:
+     *   - <base>.srt  : one subtitle per encoded frame, mapping video time → sim time.
+     *                   Entry N spans frame N's video timestamp to frame N+1's; the last
+     *                   frame uses one frame-duration as its display window.
+     *   - <base>.json : present only when a `metadata` object was passed to start()
+     *                   (e.g. the data video's eta → red scale/offset for decoding).
      */
-    #downloadSrt() {
-        if (this.#subtitles.length === 0) return;
+    async #writeSidecars() {
+        if (this.#subtitles.length > 0) {
+            let srt = '';
+            for (let i = 0; i < this.#subtitles.length; i++) {
+                const startUs = this.#subtitles[i].videoUs;
+                const endUs   = i + 1 < this.#subtitles.length
+                    ? this.#subtitles[i + 1].videoUs
+                    : startUs + this.#usPerFrame;
+                const simTime = this.#subtitles[i].simTime;
 
-        let srt = '';
-        for (let i = 0; i < this.#subtitles.length; i++) {
-            const startUs = this.#subtitles[i].videoUs;
-            const endUs   = i + 1 < this.#subtitles.length
-                ? this.#subtitles[i + 1].videoUs
-                : startUs + this.#usPerFrame;
-            const simTime = this.#subtitles[i].simTime;
-
-            srt += `${i + 1}\n`;
-            srt += `${this.#usToSrtTime(startUs)} --> ${this.#usToSrtTime(endUs)}\n`;
-            srt += `Sim time: ${simTime.toFixed(2)} s\n\n`;
+                srt += `${i + 1}\n`;
+                srt += `${this.#usToSrtTime(startUs)} --> ${this.#usToSrtTime(endUs)}\n`;
+                srt += `Sim time: ${simTime.toFixed(2)} s\n\n`;
+            }
+            await this.#writeTextFile(`${this.#baseName}.srt`, srt);
+            console.log(`[Recording] Subtitle file saved: ${this.#baseName}.srt`);
         }
 
-        const blob = new Blob([srt], { type: 'text/plain' });
-        const url  = URL.createObjectURL(blob);
-        const a    = document.createElement('a');
-        a.href     = url;
-        a.download = 'celeris-recording.srt';
-        // Anchor must be in the document for Chrome to honour the download attribute,
-        // and the URL must not be revoked until after the browser has fetched it.
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-        console.log(`[Recording] Subtitle file saved: ${a.download}`);
+        if (this.#metadata) {
+            // frameCount is only known now (at stop). Spreading first keeps the caller's
+            // key order — if they included a frameCount placeholder, its position is kept
+            // and only its value is overwritten with the true encoded-frame total.
+            const meta = { ...this.#metadata, frameCount: this.#encodedFrameCount };
+            await this.#writeTextFile(`${this.#baseName}.json`, JSON.stringify(meta, null, 2));
+            console.log(`[Recording] Metadata file saved: ${this.#baseName}.json (${this.#encodedFrameCount} frames)`);
+        }
+    }
+
+    /** Creates/overwrites a text file in the session directory and writes `contents`. */
+    async #writeTextFile(name, contents) {
+        const handle = await this.#dirHandle.getFileHandle(name, { create: true });
+        const stream = await handle.createWritable();
+        await stream.write(contents);
+        await stream.close();
     }
 }

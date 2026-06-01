@@ -8,6 +8,7 @@ import { create_2D_Texture, create_2D_F16Texture, create_2D_Image_Texture, creat
 import { copyBathyDataToTexture, copyWaveDataToTexture, copyTSlocsToTexture, copyInitialConditionDataToTexture, copyConstantValueToTexture, copyTridiagXDataToTexture, copyTridiagYDataToTexture, copyImageBitmapToTexture, copy2DDataTo3DTexture} from './Copy_Data_to_Textures.js';  // fills in channels of txBottom
 import { makeModelMatrix, loadSceneModels, loadglTFModel} from './Model_Loaders.js';  // functions to load 3D models
 import { createRenderBindGroupLayout, createRenderBindGroup, update_colorbar, loadImage} from './Handler_Render.js';  // group bindings for render shaders
+import { createDataRenderBindGroupLayout, createDataRenderPipeline, createDataRenderBindGroup} from './Handler_DataRender.js';  // free-surface → red-channel data export render
 import { createSkyboxBindGroupLayout, createSkyboxBindGroup} from './Handler_Skybox.js';  // group bindings for skybox shaders
 import { createModelBindGroupLayout, createModelBindGroup} from './Handler_Model.js';  // group bindings for Model shaders
 import { create_Pass0_BindGroupLayout, create_Pass0_BindGroup } from './Handler_Pass0.js';  // group bindings for Pass0 shaders
@@ -79,10 +80,20 @@ async function OrderedFunctions(configContent, bathymetryContent, waveContent) {
     return { bathy2D, waveData };
 }
 
-// Module-level recorder state — shared between the render loop and the UI button handlers
+// Module-level recorder state — shared between the render loop (inside initializeWebGPUApp)
+// and the UI button handlers (registered in a separate scope), so these must be globals.
 let recorder = null;
+let dataRecorder = null;          // parallel recorder for the free-surface "data" WebM
 let recordingStartSimTime = null; // sim time (s) when the current recording began
 let autoStopTriggered = false;    // guard against triggering auto-stop more than once
+
+// Data-export render state. The GPU pipeline/buffer/sampler live inside initializeWebGPUApp;
+// these globals bridge them to the button handlers. dataCanvas/dataCtx/DataRenderBindGroup
+// are (re)built each time recording starts, via prepareDataRecording() assigned in init.
+let dataCanvas = null;            // OffscreenCanvas sized to the simulation grid
+let dataCtx = null;               // its WebGPU context (shares `device`)
+let DataRenderBindGroup = null;   // bound to the current txRenderVarsf16 while recording
+let prepareDataRecording = null;  // () => { offset, scale, dataW, dataH }; set up the above
 
 // This is an asynchronous function to set up and run the WebGPU context and resources.
 // All of the compute pipelines are included in this function
@@ -1237,6 +1248,41 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     const RenderPipeline_vertexgrid = createRenderPipeline_vertexgrid(device, vertex3DShaderCode, fragmentShaderCode, swapChainFormat, RenderBindGroupLayout, 'depth24plus');
     var RenderPipeline = RenderPipeline_quad;
 
+    // --- Data-export render: free-surface elevation → red channel (for the "data" WebM) ---
+    // The pipeline/buffer/sampler are built once here. The per-session offscreen target and
+    // bind group are (re)built by prepareDataRecording() below, which the start-recording
+    // handler calls — it lives here so it can capture these init-scoped GPU resources and
+    // the (also init-scoped) txRenderVarsf16 / swapChainFormat.
+    const fragmentDataShaderCode    = await fetchShader('/shaders/fragment_data.wgsl');
+    const DataRenderBindGroupLayout = createDataRenderBindGroupLayout(device);
+    const DataRenderPipeline        = createDataRenderPipeline(device, vertexShaderCode, fragmentDataShaderCode, swapChainFormat, DataRenderBindGroupLayout);
+    const DataRender_uniformBuffer  = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const DataRender_sampler        = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
+
+    prepareDataRecording = function () {
+        // Static eta → [0,1] mapping from the colorbar controls. Decode: eta = red01*scale + offset.
+        const offset = calc_constants.colorVal_min;
+        const scale  = (calc_constants.colorVal_max - calc_constants.colorVal_min) || 1.0;
+
+        // Offscreen target. The canvas is rounded up to even dimensions because VP9 requires
+        // them, but the grid is rendered 1:1 into a WIDTH×HEIGHT viewport at the top-left
+        // (see the data render pass), so any padding row/column is just a black border.
+        const dataW = calc_constants.WIDTH  + (calc_constants.WIDTH  & 1);
+        const dataH = calc_constants.HEIGHT + (calc_constants.HEIGHT & 1);
+        dataCanvas = new OffscreenCanvas(dataW, dataH);
+        dataCtx = dataCanvas.getContext('webgpu');
+        dataCtx.configure({
+            device,
+            format: swapChainFormat,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+        });
+
+        device.queue.writeBuffer(DataRender_uniformBuffer, 0, new Float32Array([offset, scale, 0, 0]));
+        DataRenderBindGroup = createDataRenderBindGroup(device, DataRenderBindGroupLayout, DataRender_uniformBuffer, txRenderVarsf16, DataRender_sampler);
+
+        return { offset, scale, dataW, dataH };
+    };
+
     const Copytxf32_txf16_Pipeline = createComputePipeline(device, Copytxf32_txf16_ShaderCode, Copytxf32_txf16_BindGroupLayout, allComputePipelines);
 
     console.log("Pipelines set up.");
@@ -2332,6 +2378,35 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                     document.getElementById('stop-recording-btn').click();
                 }
             }
+        }
+
+        // Parallel "data" capture: render the free-surface elevation encoded in the red
+        // channel into the offscreen grid-resolution canvas, then feed it to dataRecorder.
+        // Runs in the same tick as the photorealistic capture above; the simulation state
+        // (txRenderVarsf16) is already current from the compute passes earlier this frame.
+        if (dataRecorder && dataCtx && DataRenderBindGroup) {
+            const dataTexture = dataCtx.getCurrentTexture();
+            const dataEncoder = device.createCommandEncoder();
+            const dataPass = dataEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: dataTexture.createView(),
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                }],
+            });
+            dataPass.setPipeline(DataRenderPipeline);
+            dataPass.setBindGroup(0, DataRenderBindGroup);
+            // Constrain the draw to a WIDTH×HEIGHT viewport in the top-left corner so each
+            // grid cell maps to exactly one video pixel (1:1), independent of the even-dim
+            // padding the codec requires. Any padding row/column stays cleared (black) and
+            // is ignored by the decoder, which reads the top-left grid.width×grid.height.
+            dataPass.setViewport(0, 0, calc_constants.WIDTH, calc_constants.HEIGHT, 0, 1);
+            dataPass.draw(4);  // full-screen quad (triangle-strip), clipped to the viewport
+            dataPass.end();
+            device.queue.submit([dataEncoder.finish()]);
+
+            dataRecorder.addFrame(dataCanvas, total_time);
         }
 
         // for the tooltip & time series, extract pixel values
@@ -3647,9 +3722,36 @@ document.addEventListener('DOMContentLoaded', function () {
 
     startRecordingBtn.addEventListener('click', async function () {
         const skipFrames = parseInt(document.getElementById('recording-skip-input').value) || 1;
-        recorder = new SimulationRecorder({ fps: 30, skipFrames });
+
+        // One folder picker for all outputs: photo.webm/.srt and data.webm/.srt/.json.
+        let dirHandle;
         try {
-            await recorder.start(canvas);
+            dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+        } catch (e) {
+            if (e.name !== 'AbortError') console.error('[Recording] Folder selection failed:', e.message);
+            return;  // user cancelled — silent no-op
+        }
+
+        // Build the offscreen data target + bind group (needs init-scoped GPU resources).
+        const { offset: etaOffset, scale: etaScale } = prepareDataRecording();
+
+        recorder     = new SimulationRecorder({ fps: 30, skipFrames });
+        dataRecorder = new SimulationRecorder({ fps: 30, skipFrames });
+        try {
+            await recorder.start(canvas, { dirHandle, baseName: 'photo' });
+            await dataRecorder.start(dataCanvas, {
+                dirHandle,
+                baseName: 'data',
+                metadata: {
+                    grid: { width: calc_constants.WIDTH, height: calc_constants.HEIGHT },
+                    cellSizeMeters: calc_constants.dx,  // assumes square cells (dx === dy)
+                    heightRangeMeters: { min: etaOffset, max: etaOffset + etaScale },
+                    fps: 30,
+                    frameCount: 0,  // placeholder — filled with the encoded frame total at stop()
+                    orientation: { flipY: true },
+                    channel: 'r',
+                },
+            });
             recordingStartSimTime = null; // will be set on the first frame
             autoStopTriggered     = false;
             startRecordingBtn.disabled    = true;
@@ -3658,9 +3760,15 @@ document.addEventListener('DOMContentLoaded', function () {
             const modeLabel = document.getElementById('recording-stop-mode').value === 'auto'
                 ? `, auto-stop after ${document.getElementById('recording-autostop-input').value} sim-s`
                 : ', manual stop';
-            console.log(`[Recording] Started — 30 fps, every ${skipFrames} render frame(s)${modeLabel}.`);
+            console.log(`[Recording] Started — photo + data, 30 fps, every ${skipFrames} render frame(s)${modeLabel}.`);
         } catch (e) {
+            // If the photo recorder already started but the data one failed, wind it back.
+            try { if (recorder && recorder.isRecording) await recorder.stop(); } catch (_) {}
             recorder = null;
+            dataRecorder = null;
+            dataCtx = null;
+            dataCanvas = null;
+            DataRenderBindGroup = null;
             if (e.name !== 'AbortError') console.error('[Recording] Failed to start:', e.message);
         }
     });
@@ -3687,12 +3795,22 @@ document.addEventListener('DOMContentLoaded', function () {
         await recorder.stop();
         recorder = null;
 
+        // Finalise the parallel data recording (video + srt + json) in the same folder.
+        if (dataRecorder) {
+            recordingStatus.textContent = '● Writing data file…';
+            await dataRecorder.stop();
+            dataRecorder = null;
+        }
+        dataCtx = null;
+        dataCanvas = null;
+        DataRenderBindGroup = null;
+
         // Reset indicator and hide it
         recordingStatus.textContent = '● Recording';
         recordingStatus.classList.remove('stopping');
         recordingStatus.style.display = 'none';
         startRecordingBtn.disabled    = false;
-        console.log('[Recording] File saved successfully.');
+        console.log('[Recording] Files saved successfully.');
     });
 
     // Save baseline wave height surface
