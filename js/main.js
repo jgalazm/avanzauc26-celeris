@@ -1260,9 +1260,15 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     const DataRender_sampler        = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
 
     prepareDataRecording = function () {
-        // Static eta → [0,1] mapping from the colorbar controls. Decode: eta = red01*scale + offset.
+        // Red: static eta → [0,1] mapping from the colorbar controls (eta = red01*scale + offset).
         const offset = calc_constants.colorVal_min;
         const scale  = (calc_constants.colorVal_max - calc_constants.colorVal_min) || 1.0;
+
+        // Green: foam (Kennedy breaking intensity B) is already in [0,1], so map it directly.
+        const foamMin = 0.0;
+        const foamMax = 1.0;
+        const foamOffset = foamMin;
+        const foamScale  = (foamMax - foamMin) || 1.0;
 
         // Offscreen target. The canvas is rounded up to even dimensions because VP9 requires
         // them, but the grid is rendered 1:1 into a WIDTH×HEIGHT viewport at the top-left
@@ -1277,10 +1283,11 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
         });
 
-        device.queue.writeBuffer(DataRender_uniformBuffer, 0, new Float32Array([offset, scale, 0, 0]));
+        // Uniform layout matches DataParams in fragment_data.wgsl: [etaOffset, etaScale, foamOffset, foamScale].
+        device.queue.writeBuffer(DataRender_uniformBuffer, 0, new Float32Array([offset, scale, foamOffset, foamScale]));
         DataRenderBindGroup = createDataRenderBindGroup(device, DataRenderBindGroupLayout, DataRender_uniformBuffer, txRenderVarsf16, DataRender_sampler);
 
-        return { offset, scale, dataW, dataH };
+        return { offset, scale, foamMin, foamMax, dataW, dataH };
     };
 
     const Copytxf32_txf16_Pipeline = createComputePipeline(device, Copytxf32_txf16_ShaderCode, Copytxf32_txf16_BindGroupLayout, allComputePipelines);
@@ -3733,7 +3740,7 @@ document.addEventListener('DOMContentLoaded', function () {
         }
 
         // Build the offscreen data target + bind group (needs init-scoped GPU resources).
-        const { offset: etaOffset, scale: etaScale } = prepareDataRecording();
+        const { offset: etaOffset, scale: etaScale, foamMin, foamMax } = prepareDataRecording();
 
         recorder     = new SimulationRecorder({ fps: 30, skipFrames });
         dataRecorder = new SimulationRecorder({ fps: 30, skipFrames });
@@ -3746,10 +3753,11 @@ document.addEventListener('DOMContentLoaded', function () {
                     grid: { width: calc_constants.WIDTH, height: calc_constants.HEIGHT },
                     cellSizeMeters: calc_constants.dx,  // assumes square cells (dx === dy)
                     heightRangeMeters: { min: etaOffset, max: etaOffset + etaScale },
+                    foamRange: { min: foamMin, max: foamMax },
                     fps: 30,
                     frameCount: 0,  // placeholder — filled with the encoded frame total at stop()
                     orientation: { flipY: true },
-                    channel: 'r',
+                    channels: { r: 'surfaceElevation', g: 'foam' },
                 },
             });
             recordingStartSimTime = null; // will be set on the first frame

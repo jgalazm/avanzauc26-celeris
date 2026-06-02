@@ -1,22 +1,26 @@
 // fragment_data.wgsl
 //
-// Data-export fragment shader. Instead of the photorealistic view, this encodes the
-// raw free-surface elevation (eta) into the red channel, linearly scaled to [0,1]:
+// Data-export fragment shader. Instead of the photorealistic view, this encodes raw
+// simulation fields into the output channels, each linearly scaled to [0,1]:
 //
-//     red01 = clamp((eta - offset) / scale, 0, 1)
+//     red   = clamp((eta  - etaOffset)  / etaScale,  0, 1)   // free-surface elevation
+//     green = clamp((foam - foamOffset) / foamScale, 0, 1)   // foam / whitewater intensity
 //
-// The inverse mapping (eta = red01 * scale + offset) is written to the companion
-// .json sidecar by the recorder so the video can be decoded back to physical units.
+// The inverse mappings (e.g. eta = red01 * etaScale + etaOffset) are written to the
+// companion .json sidecar by the recorder so the video can be decoded to physical units.
 //
-// Source: txRenderVarsf16 layer 0, .r channel — the same value fragment.wgsl samples
-// as `waves`. Rendered into an offscreen canvas sized to the simulation grid so each
-// video pixel maps to one grid cell (nearest sampling, no interpolation).
+// Source: txRenderVarsf16 layer 0 — .r is eta and .a is foam (see Copytxf32_txf16.wgsl,
+// where layer 0 = vec4(eta, max_eta, bottom, foam)). The foam value is the Kennedy et al.
+// breaking intensity B, which lives in [0,1].
+//
+// Rendered into an offscreen canvas sized to the simulation grid (nearest sampling, one
+// video pixel per grid cell).
 
 struct DataParams {
-    offset: f32,   // eta value that maps to red = 0   (= colorVal_min)
-    scale:  f32,   // eta span that maps to red = 1    (= colorVal_max - colorVal_min)
-    _pad0:  f32,
-    _pad1:  f32,
+    etaOffset:  f32,   // eta value that maps to red = 0    (= colorVal_min)
+    etaScale:   f32,   // eta span that maps to red = 1     (= colorVal_max - colorVal_min)
+    foamOffset: f32,   // foam value that maps to green = 0 (default 0)
+    foamScale:  f32,   // foam span that maps to green = 1  (default 1)
 };
 
 @group(0) @binding(0) var<uniform> params: DataParams;
@@ -31,9 +35,13 @@ struct FragmentOutput {
 fn fs_main(@location(1) uv: vec2<f32>) -> FragmentOutput {
     var out: FragmentOutput;
 
-    let eta = textureSampleLevel(txRenderVarsf16, samp, uv, 0, 0.0).r;  // free surface elevation
-    let red = clamp((eta - params.offset) / params.scale, 0.0, 1.0);
+    let texel = textureSampleLevel(txRenderVarsf16, samp, uv, 0, 0.0);  // layer 0
+    let eta  = texel.r;  // free surface elevation
+    let foam = texel.a;  // foam / whitewater intensity (Kennedy B)
 
-    out.color = vec4<f32>(red, 0.0, 0.0, 1.0);
+    let red   = clamp((eta  - params.etaOffset)  / params.etaScale,  0.0, 1.0);
+    let green = clamp((foam - params.foamOffset) / params.foamScale, 0.0, 1.0);
+
+    out.color = vec4<f32>(red, green, 0.0, 1.0);
     return out;
 }
