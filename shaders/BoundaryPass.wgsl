@@ -159,10 +159,6 @@ fn sineWave(x: f32, y: f32, t: f32, d: f32, amplitude: f32, period: f32, theta: 
     if(num_waves > 0){
         eta = eta * max(0.0, min(1.0, ((f32(num_waves) * period - t)/(period))));
     }
-    // let factor = clamp((x-5000.0)/300.0,0.0,1.0); // v1 
-    
-    let factor = clamp((x-1300.0)/300.0,0.0,1.000); // v2,v3
-    eta = mix(eta, 0.0, factor);
     let speed = globals.boundary_g * eta / (c * k) * tanh(k * d);
     let hu = speed * cos(theta_mod);
     let hv = speed * sin(theta_mod);
@@ -353,7 +349,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     // Incoming Waves
     // west boundary
-    if (globals.west_boundary_type == 2 && idx.x <= 200) {
+    if (globals.west_boundary_type == 2 && idx.x <= 2) {
         if (globals.incident_wave_type <= 2) { // Sine Waves
             let iBC = 1;
             let jBC = 1;
