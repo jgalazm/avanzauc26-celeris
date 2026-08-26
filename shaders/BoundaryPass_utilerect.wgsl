@@ -169,7 +169,7 @@ fn sineWave(x: f32, y: f32, t: f32, d: f32, amplitude: f32, period: f32, theta: 
     }
     let eta_b = eta;
 
-    eta = (2 - rect_suave(y, 15.0, 10.0, 0.0)) * eta_b;
+    eta = (2 - rect_suave(y, 400.0, 100.0, 0.0)) * eta_b;
     let speed = globals.boundary_g * eta / (c * k) * tanh(k * d);
     let hu = speed * cos(theta_mod);
     let hv = speed * sin(theta_mod);
