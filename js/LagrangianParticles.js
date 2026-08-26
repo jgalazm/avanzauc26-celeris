@@ -3,41 +3,56 @@ import { calc_constants } from './constants_load_calc.js';
 console.log('[LAG] LagrangianParticles.js loaded');
 console.warn('[LAG] LagrangianParticles.js loaded');
 
-function rubberDuckSvg(body, shade, beak = '#FF9800') {
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-        <ellipse cx="26" cy="42" rx="23" ry="16" fill="${body}"/>
-        <path d="M6 41c-3-3 1-9 6-8 2 3 1 8-2 10z" fill="${shade}"/>
-        <ellipse cx="24" cy="45" rx="10" ry="6" fill="${shade}"/>
-        <circle cx="44" cy="24" r="14" fill="${body}"/>
-        <ellipse cx="57" cy="27" rx="8" ry="4.5" fill="${beak}"/>
-        <ellipse cx="60" cy="27" rx="2.4" ry="1.7" fill="#E65100"/>
-        <circle cx="47.5" cy="20.5" r="2.6" fill="#1A1A1A"/>
-        <circle cx="48.3" cy="19.7" r="0.85" fill="#FFFFFF"/>
-    </svg>`;
-}
+const MAX_TRAIL_POINTS = 4000;
+const TRAIL_FADE_SEGMENTS = 16;
 
-function svgDataUri(svg) {
-    return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
-}
-
-export const BUOY_KINDS = [
-    { code: '1f986', emoji: '🦆', name: 'Pato Rockford' },
-    { src: svgDataUri(rubberDuckSvg('#FFD54F', '#F4C430')), emoji: '🟡', name: 'Pato de hule amarillo' },
-    { code: '1f6df', emoji: '🛟', name: 'Flotador' },
-    { code: '1f3d0', emoji: '🏐', name: 'Pelota de playa' },
-    { code: '26bd', emoji: '⚽', name: 'Pelota de fútbol' },
-    { code: '1f3c4', emoji: '🏄', name: 'Surfista' },
+const TRAIL_PALETTE = [
+    [54, 75, 154],
+    [74, 123, 183],
+    [110, 166, 205],
+    [152, 202, 225],
+    [194, 228, 239],
+    [254, 218, 139],
+    [253, 179, 102],
+    [246, 126, 75],
+    [221, 61, 45],
+    [165, 0, 38],
 ];
 
-function buoyImageSrc(kind) {
-    if (kind.src) {
-        return kind.src;
-    }
-    return `https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/${kind.code}.png`;
+function lerpChannel(a, b, t) {
+    return Math.round(a + (b - a) * t);
 }
 
-export function buoyKindForIndex(index) {
-    return BUOY_KINDS[((index % BUOY_KINDS.length) + BUOY_KINDS.length) % BUOY_KINDS.length];
+export function trailColorForIndex(index, count) {
+    const t = count <= 1 ? 0.5 : index / (count - 1);
+    const x = t * (TRAIL_PALETTE.length - 1);
+    const i0 = Math.floor(x);
+    const i1 = Math.min(i0 + 1, TRAIL_PALETTE.length - 1);
+    const f = x - i0;
+    const c0 = TRAIL_PALETTE[i0];
+    const c1 = TRAIL_PALETTE[i1];
+    return `rgb(${lerpChannel(c0[0], c1[0], f)}, ${lerpChannel(c0[1], c1[1], f)}, ${lerpChannel(c0[2], c1[2], f)})`;
+}
+
+function assignTrailColors(particles) {
+    const n = particles.length;
+    for (let i = 0; i < n; i++) {
+        particles[i].trailColor = trailColorForIndex(i, n);
+    }
+}
+
+function appendTrailPoint(particle, x, y) {
+    if (!particle.trail) {
+        particle.trail = [];
+    }
+    const last = particle.trail[particle.trail.length - 1];
+    if (last && last.x === x && last.y === y) {
+        return;
+    }
+    particle.trail.push({ x, y });
+    if (particle.trail.length > MAX_TRAIL_POINTS) {
+        particle.trail.splice(0, particle.trail.length - MAX_TRAIL_POINTS);
+    }
 }
 
 let overlayEl = null;
@@ -50,7 +65,7 @@ export function getLagrangianState() {
             placing: 0,
             evolve: 0,
             particles: [],
-            K: 0.1,
+            K: 0.001,
             needUpload: 0,
             lastTime: 0,
             frame: 0,
@@ -93,19 +108,23 @@ function injectOverlayStyle() {
         .lagrangian-duck {
             position: absolute;
             transform: translate(-50%, -50%);
-            line-height: 0;
-            user-select: none;
-            background: transparent;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #e53935;
+            border: 2px solid #ffffff;
+            box-sizing: border-box;
             padding: 0;
-            border: none;
-            box-shadow: none;
+            pointer-events: none;
+            user-select: none;
         }
-        .lagrangian-duck img {
-            display: block;
-            width: 36px;
-            height: 36px;
-            background: transparent;
-            border: none;
+        .lagrangian-trails {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: visible;
             pointer-events: none;
         }
     `;
@@ -134,11 +153,11 @@ export function updateLagrangianStatus() {
     const L = getLagrangianState();
     const n = L.particles.length;
     if (L.placing == 1) {
-        status.textContent = `Status: placing initial condition (${n} duck${n == 1 ? '' : 's'}). Left-click the map in Design Mode.`;
+        status.textContent = `Status: placing initial condition (${n} particle${n == 1 ? '' : 's'}). Left-click the map in Design Mode.`;
     } else if (L.evolve == 1 && n > 0) {
-        status.textContent = `Status: evolving ${n} buoy${n == 1 ? '' : 's'} with K = ${L.K}`;
+        status.textContent = `Status: evolving ${n} particle${n == 1 ? '' : 's'} with K = ${L.K}`;
     } else if (n > 0) {
-        status.textContent = `Status: ${n} buoy${n == 1 ? '' : 's'} placed, waiting to finish initial condition.`;
+        status.textContent = `Status: ${n} particle${n == 1 ? '' : 's'} placed, waiting to finish initial condition.`;
     } else {
         status.textContent = 'Status: idle';
     }
@@ -186,6 +205,13 @@ export function finishLagrangianPlacement(canvas) {
     if (L.particles.length > 0) {
         L.evolve = 1;
         L.lastTime = 0.0;
+        for (let i = 0; i < L.particles.length; i++) {
+            const p = L.particles[i];
+            if (!p.trail || p.trail.length === 0) {
+                p.trail = [{ x: p.x, y: p.y }];
+            }
+        }
+        assignTrailColors(L.particles);
     } else {
         L.evolve = 0;
     }
@@ -214,13 +240,13 @@ export function addParticleAtMeters(x, y) {
         console.log('Maximum number of Lagrangian particles reached.');
         return false;
     }
-    L.particles.push({ x, y, kind: L.particles.length % BUOY_KINDS.length });
+    L.particles.push({ x, y, trail: [] });
     L.needUpload = 1;
     L.placing = 1;
     L.clickPending = 0;
     syncLagrangianToCalcConstants();
     updateLagrangianStatus();
-    console.warn(`[LAG] Duck ${L.particles.length} placed at x=${x.toFixed(2)} m, y=${y.toFixed(2)} m`);
+    console.warn(`[LAG] Particle ${L.particles.length} placed at x=${x.toFixed(2)} m, y=${y.toFixed(2)} m`);
     return true;
 }
 
@@ -306,12 +332,12 @@ export async function readParticlePositions(device, texture, canvas) {
         for (let i = 0; i < n; i++) {
             const base = i * 4;
             if (!L.particles[i]) {
-                L.particles[i] = { x: 0, y: 0, kind: i % BUOY_KINDS.length };
+                L.particles[i] = { x: 0, y: 0, trail: [] };
             }
             L.particles[i].x = bufferCopy[base];
             L.particles[i].y = bufferCopy[base + 1];
-            if (L.particles[i].kind == null) {
-                L.particles[i].kind = i % BUOY_KINDS.length;
+            if (L.evolve == 1) {
+                appendTrailPoint(L.particles[i], L.particles[i].x, L.particles[i].y);
             }
         }
         syncLagrangianToCalcConstants();
@@ -357,41 +383,99 @@ export function updateDuckOverlay(canvas) {
     const particles = L.particles;
     const n = particles.length;
 
-    while (overlay.childElementCount < n) {
+    let svg = overlay.querySelector('svg.lagrangian-trails');
+    if (!svg) {
+        svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('class', 'lagrangian-trails');
+        svg.setAttribute('viewBox', '0 0 100 100');
+        svg.setAttribute('preserveAspectRatio', 'none');
+        overlay.insertBefore(svg, overlay.firstChild);
+    }
+
+    let duckCount = overlay.querySelectorAll(':scope > .lagrangian-duck').length;
+    while (duckCount < n) {
         const duck = document.createElement('span');
         duck.className = 'lagrangian-duck';
         overlay.appendChild(duck);
+        duckCount += 1;
     }
-    while (overlay.childElementCount > n) {
-        overlay.removeChild(overlay.lastChild);
+    while (overlay.querySelectorAll(':scope > .lagrangian-duck').length > n) {
+        const extra = overlay.querySelector(':scope > .lagrangian-duck:last-of-type');
+        if (!extra) {
+            break;
+        }
+        overlay.removeChild(extra);
     }
 
+    const ducks = overlay.querySelectorAll(':scope > .lagrangian-duck');
     for (let i = 0; i < n; i++) {
         const p = particles[i];
-        const duck = overlay.children[i];
+        const duck = ducks[i];
         if (!p || !duck) {
             continue;
         }
-        const kind = buoyKindForIndex(p.kind == null ? i : p.kind);
-        let img = duck.querySelector('img');
-        if (!img) {
-            duck.textContent = '';
-            img = document.createElement('img');
-            img.alt = '';
-            img.draggable = false;
-            duck.appendChild(img);
-        }
-        const src = buoyImageSrc(kind);
-        if (img.getAttribute('src') !== src) {
-            img.src = src;
-        }
-        img.alt = kind.name;
-        img.style.filter = 'none';
-        duck.title = kind.name;
+        duck.textContent = '';
+        duck.title = `Particle ${i + 1}`;
         const leftPct = (p.x / domainX) * 100.0;
         const topPct = (1.0 - p.y / domainY) * 100.0;
         duck.style.left = `${leftPct}%`;
         duck.style.top = `${topPct}%`;
+    }
+
+    while (svg.firstChild) {
+        svg.removeChild(svg.firstChild);
+    }
+
+    if (L.evolve == 1) {
+        for (let i = 0; i < n; i++) {
+            const p = particles[i];
+            if (!p || !p.trail || p.trail.length < 2) {
+                continue;
+            }
+            const color = p.trailColor || trailColorForIndex(i, n);
+            appendFadedTrail(svg, p.trail, color, domainX, domainY);
+        }
+    }
+}
+
+function trailPointsAttr(trail, i0, i1, domainX, domainY) {
+    let pts = '';
+    for (let k = i0; k <= i1; k++) {
+        const tx = (trail[k].x / domainX) * 100.0;
+        const ty = (1.0 - trail[k].y / domainY) * 100.0;
+        pts += `${tx},${ty} `;
+    }
+    return pts.trim();
+}
+
+function makeTrailPolyline(svg, points, color, width, opacity) {
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    line.setAttribute('fill', 'none');
+    line.setAttribute('stroke', color);
+    line.setAttribute('stroke-width', String(width));
+    line.setAttribute('stroke-opacity', String(opacity));
+    line.setAttribute('stroke-linejoin', 'round');
+    line.setAttribute('stroke-linecap', 'round');
+    line.setAttribute('vector-effect', 'non-scaling-stroke');
+    line.setAttribute('points', points);
+    svg.appendChild(line);
+}
+
+function appendFadedTrail(svg, trail, color, domainX, domainY) {
+    const last = trail.length - 1;
+    const full = trailPointsAttr(trail, 0, last, domainX, domainY);
+    makeTrailPolyline(svg, full, color, 12, 0.12);
+
+    const usable = Math.max(1, last);
+    for (let s = 0; s < TRAIL_FADE_SEGMENTS; s++) {
+        const i0 = Math.floor((s / TRAIL_FADE_SEGMENTS) * usable);
+        let i1 = Math.floor(((s + 1) / TRAIL_FADE_SEGMENTS) * usable);
+        if (i1 <= i0) {
+            i1 = Math.min(i0 + 1, last);
+        }
+        const opacity = 0.10 + 0.52 * Math.pow((s + 1) / TRAIL_FADE_SEGMENTS, 1.35);
+        const width = 7 + 1.5 * ((s + 1) / TRAIL_FADE_SEGMENTS);
+        makeTrailPolyline(svg, trailPointsAttr(trail, i0, i1, domainX, domainY), color, width, opacity);
     }
 }
 

@@ -1,5 +1,5 @@
 
-import { buoyKindForIndex } from './LagrangianParticles.js';
+import { trailColorForIndex } from './LagrangianParticles.js';
 
 export function displayCalcConstants(calc_constants, total_time) {
     // Make sure the DOM is fully loaded before trying to access elements
@@ -143,7 +143,7 @@ export function displayLagrangianParticles(calc_constants) {
     container.innerHTML = '';
     const n = calc_constants.NumberOfParticles;
     if (n <= 0) {
-        container.innerHTML = 'No buoys placed.<br>';
+        container.innerHTML = 'No particles placed.<br>';
         return;
     }
 
@@ -152,8 +152,11 @@ export function displayLagrangianParticles(calc_constants) {
         if (!p) {
             continue;
         }
-        const kind = buoyKindForIndex(p.kind == null ? i : p.kind);
-        container.innerHTML += `${kind.emoji} ${kind.name} ${i + 1}, X: ${Math.round(p.x * 100) / 100}, Y: ${Math.round(p.y * 100) / 100}<br>`;
+        const color = p.trailColor || trailColorForIndex(i, n);
+        const swatch = p.trailColor
+            ? `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${color};border:1px solid #fff;vertical-align:middle;margin-right:6px"></span>`
+            : `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#e53935;border:1px solid #fff;vertical-align:middle;margin-right:6px"></span>`;
+        container.innerHTML += `${swatch} Particle ${i + 1}, X: ${Math.round(p.x * 100) / 100}, Y: ${Math.round(p.y * 100) / 100}<br>`;
     }
 }
 
