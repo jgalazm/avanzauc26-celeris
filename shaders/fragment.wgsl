@@ -49,8 +49,8 @@ struct Globals {
     designcomponent_Fric_Seawall: f32,
     bathy_cmap_zero: f32,
     renderZScale: f32,
-    temp1: f32,
-    temp2: f32,
+    NumberOfParticles: i32,
+    particleTexBase: i32,
     viewProj: mat4x4<f32>, // bytes 192–255: your camera matrix
     showArrows: i32,
     arrow_scale: f32,
