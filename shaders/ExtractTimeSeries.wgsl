@@ -12,15 +12,15 @@ struct Globals {
 
 @group(0) @binding(0) var<uniform> globals: Globals;
 
-@group(0) @binding(1) var txBottom: texture_2d<f32>; 
-@group(0) @binding(2) var txBottomFriction: texture_2d<f32>; 
-@group(0) @binding(3) var txContSource: texture_2d<f32>; 
-@group(0) @binding(4) var txState: texture_2d<f32>; 
-@group(0) @binding(5) var txWaveHeight: texture_2d<f32>; 
-@group(0) @binding(6) var txTimeSeries_Locations: texture_2d<f32>; 
+@group(0) @binding(1) var txBottom: texture_2d<f32>;
+@group(0) @binding(2) var txBottomFriction: texture_2d<f32>;
+@group(0) @binding(3) var txContSource: texture_2d<f32>;
+@group(0) @binding(4) var txState: texture_2d<f32>;
+@group(0) @binding(5) var txWaveHeight: texture_2d<f32>;
+@group(0) @binding(6) var txTimeSeries_Locations: texture_2d<f32>;
 @group(0) @binding(7) var txTimeSeries_Data: texture_storage_2d<rgba32float, write>;
 @group(0) @binding(8) var txMeans_Speed: texture_2d<f32>;
-
+@group(0) @binding(9) var txModelVelocities: texture_2d<f32>;
 
 @compute @workgroup_size(1, 1)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -30,8 +30,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var output = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     if (idx.x == 0) { // for the first index in the texture, store the tooltip
         current_location = vec2<i32>(globals.mouse_current_canvas_indX, globals.mouse_current_canvas_indY);
-        let bottom = textureLoad(txBottom, current_location, 0).z; 
-        let friction = textureLoad(txBottomFriction, current_location, 0).x;   // friction factor, always between [0 and 1], no normalization needed 
+        let bottom = textureLoad(txBottom, current_location, 0).z;
+        let friction = textureLoad(txBottomFriction, current_location, 0).x;   // friction factor, always between [0 and 1], no normalization needed
 
         if (globals.river_sim == 1) {
             let state = textureLoad(txState, current_location, 0).xyz;  // Free surface elevation, P, Q  LARIVER mod
@@ -55,11 +55,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {  // for all other indices, store the time series data
         current_location = vec2<i32>(textureLoad(txTimeSeries_Locations, idx, 0).xy);
         let waves = textureLoad(txState, current_location, 0).x;  // Free surface elevation
-        let P = textureLoad(txState, current_location, 0).y;  // x-flux
+        let P = textureLoad(txModelVelocities, current_location, 0).r;// lo cmabie por u textureLoad(txState, current_location, 0).y;  // x-flux
         let Q = textureLoad(txState, current_location, 0).z;   // y-flux
         output = vec4<f32>(globals.time, waves, P, Q);
     }
 
     textureStore(txTimeSeries_Data, idx, output);
 }
-

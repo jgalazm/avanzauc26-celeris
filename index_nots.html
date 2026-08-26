@@ -72,7 +72,7 @@
             font-size: 12px; 
         }
 
-        #constants-container, #mods-container, #downloads-container, #uploads-container, #viz-container, #design-container, #disturbance-container, #boundary-container, #sediment-container, #timeseries-container, #animations-container, #parameters-container, #analysis-container {
+        #constants-container, #mods-container, #downloads-container, #uploads-container, #viz-container, #design-container, #disturbance-container, #boundary-container, #sediment-container, #timeseries-container, #animations-container, #parameters-container, #analysis-container, #particles-container {
             background-color: #f9f9f9;
             border: 1px solid red;
             padding: 5px;
@@ -1391,6 +1391,49 @@
                     <br />
                 </div>
 
+            </div>
+
+
+            <div id="particles-container" class="custom-window">
+                <div class="window-header">
+                    <span><center> Lagrangian Passive Buoys </center></span>
+                    <button class="minimize-button">-</button>
+                </div>
+                <div class="window-content"  data-default="minimized">
+                    <html4f>
+                        Particle analog of the Eulerian passive tracer. Each buoy follows the live
+                        hydrodynamic velocity with a random walk of diffusivity K
+                        (dX = u dt + &radic;(2K) dW). Place yellow ducks in Design Mode, then finish
+                        the initial condition to start motion.
+                    </html4f>
+                    <br />
+                    <br />
+
+                    <button id="lagrangian-start-button" type="button">Start Adding Particles</button>
+                    <button id="lagrangian-finish-button" type="button">Finish Initial Condition</button>
+                    <button id="lagrangian-clear-button" type="button">Clear Particles</button>
+                    <br />
+                    <br />
+
+                    <div id="lagrangian-status">Status: idle</div>
+                    <br />
+
+                    <label for="lagrangianK-input">Diffusivity K (m^2/s), random-walk intensity:</label>
+                    <br />
+                    <input type="number" id="lagrangianK-input" name="lagrangianKValue" min="0" step="0.01">
+                    <button id="lagrangianK-button" type="button">Update</button>
+                    <br />
+                    <br />
+
+                    <html4f>
+                        Left-click on the map (Design Mode) while adding particles to drop a yellow duck buoy.
+                    </html4f>
+                    <br />
+                    <br />
+
+                    <div id="lagrangianlocs-container" class="flex-container">
+                    </div>
+                </div>
             </div>
             <br />
             Celeris-WebGPU v.2025.01.21<br>

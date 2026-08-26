@@ -80,13 +80,22 @@ export function create_ExtractTimeSeries_BindGroupLayout(device) {
                     sampleType: 'unfilterable-float',
                     format: 'rgba32float'
                 }
-            }
+            },
+            {
+                // damnyan santander u
+                binding: 9,
+                visibility: GPUShaderStage.COMPUTE,
+                texture: {
+                    sampleType: 'unfilterable-float',
+                    format: 'rgba32float'
+                }
+            },
         ]
     });
 }
 
 
-export function create_ExtractTimeSeries_BindGroup(device, uniformBuffer, txBottom, txBottomFriction, txContSource, txState, txWaveHeight, txTimeSeries_Locations, txTimeSeries_Data, txMeans_Speed) {
+export function create_ExtractTimeSeries_BindGroup(device, uniformBuffer, txBottom, txBottomFriction, txContSource, txState, txWaveHeight, txTimeSeries_Locations, txTimeSeries_Data, txMeans_Speed, txModelVelocities) {
     return device.createBindGroup({
         layout: create_ExtractTimeSeries_BindGroupLayout(device),
         entries: [
@@ -127,6 +136,10 @@ export function create_ExtractTimeSeries_BindGroup(device, uniformBuffer, txBott
             {
                 binding: 8,
                 resource: txMeans_Speed.createView()
+            },
+            {
+                binding: 9,
+                resource: txModelVelocities.createView()
             }
         ]
     });

@@ -1,4 +1,6 @@
 
+import { buoyKindForIndex } from './LagrangianParticles.js';
+
 export function displayCalcConstants(calc_constants, total_time) {
     // Make sure the DOM is fully loaded before trying to access elements
     if (document.readyState === 'loading') {
@@ -124,6 +126,34 @@ export function displayTimeSeriesLocations(calc_constants) {
                              `X: ${Math.round(calc_constants.locationOfTimeSeries[i].xts * 100) / 100}, ` +
                              `Y: ${Math.round(calc_constants.locationOfTimeSeries[i].yts * 100) / 100}<br>`;
         container.innerHTML += locationInfo; // Append location info directly with line breaks
+    }
+}
+
+export function displayLagrangianParticles(calc_constants) {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => displayLagrangianParticles(calc_constants));
+        return;
+    }
+
+    const container = document.getElementById('lagrangianlocs-container');
+    if (!container) {
+        return;
+    }
+
+    container.innerHTML = '';
+    const n = calc_constants.NumberOfParticles;
+    if (n <= 0) {
+        container.innerHTML = 'No buoys placed.<br>';
+        return;
+    }
+
+    for (let i = 0; i < n; i++) {
+        const p = calc_constants.lagrangianParticles[i];
+        if (!p) {
+            continue;
+        }
+        const kind = buoyKindForIndex(p.kind == null ? i : p.kind);
+        container.innerHTML += `${kind.emoji} ${kind.name} ${i + 1}, X: ${Math.round(p.x * 100) / 100}, Y: ${Math.round(p.y * 100) / 100}<br>`;
     }
 }
 

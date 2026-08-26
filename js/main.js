@@ -14,7 +14,7 @@ import { createModelBindGroupLayout, createModelBindGroup} from './Handler_Model
 import { create_Pass0_BindGroupLayout, create_Pass0_BindGroup } from './Handler_Pass0.js';  // group bindings for Pass0 shaders
 import { create_Pass1_BindGroupLayout, create_Pass1_BindGroup } from './Handler_Pass1.js';  // group bindings for Pass1 shaders
 import { create_SedTrans_Pass1_BindGroupLayout, create_SedTrans_Pass1_BindGroup } from './Handler_SedTrans_Pass1.js';  // group bindings for SedTrans_Pass1 shaders
-import { create_Pass2_BindGroupLayout, create_Pass2_BindGroup } from './Handler_Pass2.js';  // group bindings for Pass2 shaders 
+import { create_Pass2_BindGroupLayout, create_Pass2_BindGroup } from './Handler_Pass2.js';  // group bindings for Pass2 shaders
 import { create_PassBreaking_BindGroupLayout, create_PassBreaking_BindGroup } from './Handler_PassBreaking.js';  // group bindings for PassBreaking shaders
 import { create_Pass3_BindGroupLayout, create_Pass3_BindGroup, create_Pass3A_Coulwave_BindGroupLayout, create_Pass3A_Coulwave_BindGroup, create_Pass3B_Coulwave_BindGroupLayout, create_Pass3B_Coulwave_BindGroup } from './Handler_Pass3.js';  // group bindings for Pass3 shaders
 import { create_SedTrans_Pass3_BindGroupLayout, create_SedTrans_Pass3_BindGroup } from './Handler_SedTrans_Pass3.js';  // group bindings for SedTrans_Pass3 shaders
@@ -28,12 +28,17 @@ import { create_CalcWaveHeight_BindGroupLayout, create_CalcWaveHeight_BindGroup 
 import { create_AddDisturbance_BindGroupLayout, create_AddDisturbance_BindGroup } from './Handler_AddDisturbance.js';  // group bindings for adding a landslide or tsunami impulsive source
 import { create_MouseClickChange_BindGroupLayout, create_MouseClickChange_BindGroup } from './Handler_MouseClickChange.js';  // group bindings for mouse click changes
 import { create_ExtractTimeSeries_BindGroupLayout, create_ExtractTimeSeries_BindGroup } from './Handler_ExtractTimeSeries.js';  // group bindings for storing single pixel / time series values
+import { create_AdvectParticles_BindGroupLayout, create_AdvectParticles_BindGroup } from './Handler_AdvectParticles.js';  // group bindings for Lagrangian buoy advection
+import { addParticleFromGridClick, addParticleAtMeters, copyParticleLocsToTexture, runCopyParticles, readParticlePositions, updateDuckOverlay, updateLagrangianStatus, clearLagrangianParticles, ensureParticleOverlay, startLagrangianPlacement, finishLagrangianPlacement, isLagrangianPanelOpen, isPlacingLagrangian, syncLagrangianToCalcConstants, getLagrangianState } from './LagrangianParticles.js';
 import { create_Copytxf32_txf16_BindGroupLayout, create_Copytxf32_txf16_BindGroup } from './Handler_Copytxf32_txf16.js';  // group bindings for f32 to f16 copy shader
 import { createComputePipeline, createRenderPipeline, createRenderPipeline_vertexgrid, createSkyboxPipeline, createModelPipeline, createDuckPipeline} from './Config_Pipelines.js';  // pipeline config for ALL shaders
 import { fetchShader, runComputeShader, runCopyTextures, runComputeShader_EncStack, runCopyTextures_EncStack} from './Run_Compute_Shader.js';  // function to run shaders, works for all
 import { runTridiagSolver } from './Run_Tridiag_Solver.js';  // function to run PCR triadiag solver, works for all
-import { displayCalcConstants, displaySimStatus, displayTimeSeriesLocations, displaySlideVolume, ConsoleLogRedirection} from './display_parameters.js';  // starting point for display of simulation parameters
+import { displayCalcConstants, displaySimStatus, displayTimeSeriesLocations, displayLagrangianParticles, displaySlideVolume, ConsoleLogRedirection} from './display_parameters.js';  // starting point for display of simulation parameters
 import { mat4, vec3 } from 'https://cdn.jsdelivr.net/npm/gl-matrix/esm/index.js';
+
+console.log('[LAG] main.js module evaluating, readyState=', document.readyState);
+console.warn('[LAG] main.js module evaluating, readyState=', document.readyState);
 
 // Get a reference to the HTML canvas element with the ID 'webgpuCanvas'
 const canvas = document.getElementById('webgpuCanvas');
@@ -43,6 +48,7 @@ const gpu = navigator.gpu;
 
 // globals in this source file
 let device = null;
+let txParticlesGPU = null;
 let txScreen = null;
 let txAnimation = null;
 let txOverlayMap = null;
@@ -74,9 +80,9 @@ async function OrderedFunctions(configContent, bathymetryContent, waveContent) {
 
     // Load depth surface file, place into 2D array bathy2D
     let bathy2D = await loadDepthSurface(bathymetryContent, calc_constants);  // Start this only after the first function completes
-    // Load wave data file, place into waveArray 
+    // Load wave data file, place into waveArray
     let { numberOfWaves, waveData } = await loadWaveData(waveContent, calc_constants);  // Start this only after the first function completes
-    calc_constants.numberOfWaves = numberOfWaves; 
+    calc_constants.numberOfWaves = numberOfWaves;
     return { bathy2D, waveData };
 }
 
@@ -107,9 +113,10 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     });
     allTextures.clear(); // Clear the set for the next run
     allComputePipelines.clear(); // Clear pipelines
-    RenderPipeline = null; 
+    RenderPipeline = null;
 
     device = null;
+    txParticlesGPU = null;
     adapter = null;
     context = null;
     calc_constants.GoogleMapOverlay = 0; // not all configs have this declared, so can create issue when switching back and forth
@@ -129,7 +136,9 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     device = await adapter.requestDevice({
         // Enable built-in validation
         requiredFeatures: [],
-        requiredLimits: {},
+        requiredLimits: {
+            maxTextureDimension2D: 16384 // Aumentar límite de texturas para batimetrías grandes
+        },
         forceFallbackAdapter: false,
     });
     console.log("GPU Device acquired, starting resource creation...");
@@ -159,6 +168,9 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
 
     // load the simulation parameters, the 2D depth surface, and the wave data.  "Ordered" as the sequence of how these files are loaded is important
     let { bathy2D, waveData } = await OrderedFunctions(configContent, bathymetryContent, waveContent);
+    const Linit = getLagrangianState();
+    Linit.K = calc_constants.whiteWaterDispersion;
+    syncLagrangianToCalcConstants();
 
     // Create buffers for storing uniform data. This buffer will be used to send parameter data to shaders.
     const Pass0_uniformBuffer = createUniformBuffer(device);
@@ -181,6 +193,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     const AddDisturbance_uniformBuffer = createUniformBuffer(device);
     const MouseClickChange_uniformBuffer = createUniformBuffer(device);
     const ExtractTimeSeries_uniformBuffer = createUniformBuffer(device);
+    const AdvectParticles_uniformBuffer = createUniformBuffer(device);
     let Render_bufferSize = 272; // 272 bytes for render pipeline, 256 for compute pipeline
     const Render_uniformBuffer = createUniformBuffer(device,Render_bufferSize);
     const Skybox_uniformBuffer = createUniformBuffer(device); // View and Projection buffer: holds two 4×4 f32 view matrix (16 floats → 64 bytes)
@@ -235,8 +248,8 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     const depostion_Sed = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // local depostion for all class "d"
     const txBotChange_Sed = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // cumulative bottom elevation change
     const txHardBottom = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // stores hard bottom elevation
-    const txBottomFriction = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // stores bottom friction info   
-    const txDesignComponents = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // stores map of added components  
+    const txBottomFriction = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // stores bottom friction info
+    const txDesignComponents = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // stores map of added components
     const txContSource = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // stores passive tracer source map
     const txXFlux = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // stores x-flux values along cell edges
     const txYFlux = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // stores y-flux values along cell edges
@@ -268,17 +281,17 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     const txtemp_MouseClick2 = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // temp storage for MouseClick shader
     const coefMatx = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // tridiagonal coefficients for x-dir (bous only)
     const coefMaty = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // tridiagonal coefficients for y-dir (bous only)
-    const newcoef_x = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // PCR reduced tridiagonal coefficients for x-dir (bous only) 
-    const newcoef_y = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // PCR reduced tridiagonal coefficients for y-dir (bous only) 
+    const newcoef_x = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // PCR reduced tridiagonal coefficients for x-dir (bous only)
+    const newcoef_y = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // PCR reduced tridiagonal coefficients for y-dir (bous only)
     const dU_by_dt = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // stores d(state)/dt values output from Pass3 calls
     const dU_by_dt_Sed = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // stores d(state)/dt values output from Pass3 calls
     const txBoundaryForcing = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // stores ship pressure - not used in WebGPU yet
     const txModelVelocities = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // stores the u,v velocities from the cell size averages - these are the proper u,v used by the flux scheme
-    var txCW_groupings = null;  // stores the variables groupings for the coulwave implementation 
+    var txCW_groupings = null;  // stores the variables groupings for the coulwave implementation
     var txCW_uvhuhv; var txCW_zalpha = null; var txCW_STval = null; var txCW_STgrad = null; var txCW_Eterms = null; var txCW_FGterms = null; // these are only used if COULWAVE is selected
-    
+
     if (calc_constants.NLSW_or_Bous == 2) {  // only use the space if needed
-        txCW_groupings = create_3D_Data_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, 6, allTextures); 
+        txCW_groupings = create_3D_Data_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, 6, allTextures);
         // level 0: txCW_uvhuhv, [u, v, du, dv]
         // level 1: txCW_zalpha, [za, dzadx, dzady, 0.0)]
         // level 2: txCW_STval, [S, T, d2udxdy, d2vdxdy]
@@ -293,7 +306,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
         txCW_FGterms = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // stores the F and G terms
     }
     else {  // these need to exist as textures, but are not used, so make them small
-        txCW_groupings = create_3D_Data_Texture(device, 1, 1, 2, allTextures); 
+        txCW_groupings = create_3D_Data_Texture(device, 1, 1, 2, allTextures);
         txCW_uvhuhv = create_2D_Texture(device, 1, 1, allTextures);  // stores the velocities
         txCW_zalpha = create_2D_Texture(device, 1, 1, allTextures);  // stores the z-alpha values
         txCW_STval = create_2D_Texture(device, 1, 1, allTextures);  // stores the S and T values
@@ -301,7 +314,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
         txCW_Eterms = create_2D_Texture(device, 1, 1, allTextures);  // stores the E terms
         txCW_FGterms = create_2D_Texture(device, 1, 1, allTextures);  // stores the F and G terms
     }
-    
+
     const txMeans = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // stores various mean values
     const txtemp_Means = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);
     const txMeans_Speed = create_2D_Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, allTextures);  // stores various mean values
@@ -320,13 +333,16 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     const txModelPNGs = create_2D_Image_Texture(device, 1024, 1024, allTextures); // will store all textures to be sampled for photo-realism
     let skybox_image_size = 500; // size of each face of the cube map
     const txCube_Skybox = create_3D_Image_Texture(device, skybox_image_size, skybox_image_size, 6, allTextures); // will store all textures to be sampled for photo-realism
-    
+
     let depthTexture = create_Depth_Texture(device, canvas.width, canvas.height, allTextures); // initial depth texture for Explorer mode
     const txRenderVarsf16 = create_2D_F16Texture(device, calc_constants.WIDTH, calc_constants.HEIGHT, 3, allTextures);  // used to store the f16 render variables for the render pipeline
 
     const txWaves = create_1D_Texture(device, calc_constants.numberOfWaves, allTextures);  // stores spectrum wave input
-    const txTimeSeries_Locations = create_1D_Texture(device, calc_constants.maxNumberOfTimeSeries, allTextures);  // stores spectrum wave input
+    const txTimeSeries_Locations = create_1D_Texture(device, calc_constants.maxNumberOfTimeSeries + calc_constants.maxNumberOfParticles, allTextures);  // gauges, then Lagrangian buoys packed after
     const txTimeSeries_Data = create_1D_Texture(device, calc_constants.maxNumberOfTimeSeries, allTextures);  // stores spectrum wave input
+    const txParticles = create_1D_Texture(device, calc_constants.maxNumberOfParticles, allTextures);  // Lagrangian buoy positions (x, y, active, id)
+    const txtemp_Particles = create_1D_Texture(device, calc_constants.maxNumberOfParticles, allTextures);  // ping-pong buffer for buoy advection
+    txParticlesGPU = txParticles;
 
     // fill in the bathy texture
     let bathy2Dvec = copyBathyDataToTexture(calc_constants, bathy2D, device, txBottom);
@@ -337,7 +353,12 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     }
 
     // fill in the time series location texture
-    copyTSlocsToTexture(calc_constants, device, txTimeSeries_Locations)  
+    copyTSlocsToTexture(calc_constants, device, txTimeSeries_Locations)
+    if (calc_constants.NumberOfParticles > 0) {
+        calc_constants.lagrangianNeedUpload = 1;
+        calc_constants.lagrangianLastTime = 0.0;
+        copyParticleLocsToTexture(device, txParticles);
+    }
 
     // create initial condition, initialize values
     var writeStateFlag = 0; // used to indicate if we not writing any state (0), writing channel 1 (1), writing channel 2 (2), or writing channel 3 (3)
@@ -349,13 +370,13 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
         console.log('Loading Initial Free Surface File')
         calc_constants.loadetaIC = 1;
         var etaICContent = null;
-        try { 
+        try {
             etaICContent = await etaInitialConditionFile.text()
-        } 
+        }
         catch {
             etaICContent = null;
         }
-        let etaIC2D = await loadInitCondSurface(etaICContent, calc_constants); 
+        let etaIC2D = await loadInitCondSurface(etaICContent, calc_constants);
         writeStateFlag = 1; // writing channel 1
         copyInitialConditionDataToTexture(calc_constants, device, etaIC2D, txState, writeStateFlag)
         copyInitialConditionDataToTexture(calc_constants, device, etaIC2D, txstateUVstar, writeStateFlag)
@@ -366,10 +387,10 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
         console.log('Loading Friction Map File')
         calc_constants.loadFriction = 1;
         const frictionContent = await frictionFile.text();
-        let friction2D = await loadFrictionSurface(frictionContent, calc_constants); 
+        let friction2D = await loadFrictionSurface(frictionContent, calc_constants);
         writeStateFlag = 1; // writing channel 1
         copyInitialConditionDataToTexture(calc_constants, device, friction2D, txBottomFriction, writeStateFlag)
-    } else  {    
+    } else  {
         copyConstantValueToTexture(calc_constants, device, txBottomFriction, calc_constants.friction, 0.0, 0.0, 0.0);
     }
 
@@ -378,10 +399,10 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
         console.log('Loading Hard Bottom Elevation File')
         calc_constants.loadHardBottom = 1;
         const HardBottomContent = await hardbottomFile.text();
-        let HardBottom2D = await loadHardBottomSurface(HardBottomContent, calc_constants); 
+        let HardBottom2D = await loadHardBottomSurface(HardBottomContent, calc_constants);
         writeStateFlag = 1; // writing channel 1
         copyInitialConditionDataToTexture(calc_constants, device, HardBottom2D, txHardBottom, writeStateFlag)
-    } else  {    
+    } else  {
         copyConstantValueToTexture(calc_constants, device, txHardBottom, -2.0 * calc_constants.base_depth, 0.0, 0.0, 0.0);
     }
 
@@ -418,8 +439,8 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
             console.log('Unable to load Google Maps overlay')
             calc_constants.GoogleMapOverlay == 0
         }
-    }    
-    
+    }
+
     // for examples, see if there is an overlay file to load
     if(OverlayFile){
         console.log('Loading Uploaded Overlay File')
@@ -438,9 +459,9 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
         calc_constants.GMscaleY = -1.0; // y-direction scaling factor to make sat image align with numerical domain
         calc_constants.GMoffsetX = 0.0;  // x-direction offset for sat image
         calc_constants.GMoffsetY = 1.0;  // y-direction offset for sat image
-        
+
         txOverlayMap = txSatMap;
-        calc_constants.IsSatMapLoaded = 1; 
+        calc_constants.IsSatMapLoaded = 1;
         calc_constants.IsOverlayMapLoaded = 1;
     }
 
@@ -448,65 +469,65 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     console.log('Downloading surface texture images...')
     // Design components textures
     // white water / turbulence texture
-    let imageUrl = '/textures/turbulence.jpg'; 
-    let imData = await loadImageBitmap(imageUrl);    
+    let imageUrl = '/textures/turbulence.jpg';
+    let imData = await loadImageBitmap(imageUrl);
     copyImageBitmapToTexture(device, imData, txSamplePNGs, 0)
     // coral reef texture
-    imageUrl = '/textures/coralreef.jpg'; 
-    imData = await loadImageBitmap(imageUrl);    
+    imageUrl = '/textures/coralreef.jpg';
+    imData = await loadImageBitmap(imageUrl);
     copyImageBitmapToTexture(device, imData, txSamplePNGs, 1)
     // oyster / mussel bed texture
-    imageUrl = '/textures/oysterbed.jpg'; 
-    imData = await loadImageBitmap(imageUrl);    
+    imageUrl = '/textures/oysterbed.jpg';
+    imData = await loadImageBitmap(imageUrl);
     copyImageBitmapToTexture(device, imData, txSamplePNGs, 2)
     // mangrove texture
-    imageUrl = '/textures/mangrove.jpg'; 
-    imData = await loadImageBitmap(imageUrl);    
+    imageUrl = '/textures/mangrove.jpg';
+    imData = await loadImageBitmap(imageUrl);
     copyImageBitmapToTexture(device, imData, txSamplePNGs, 3)
     // kelp texture
-    imageUrl = '/textures/kelpbed.jpg'; 
-    imData = await loadImageBitmap(imageUrl);    
+    imageUrl = '/textures/kelpbed.jpg';
+    imData = await loadImageBitmap(imageUrl);
     copyImageBitmapToTexture(device, imData, txSamplePNGs, 4)
     // grass texture
-    imageUrl = '/textures/grass.jpg'; 
-    imData = await loadImageBitmap(imageUrl);    
+    imageUrl = '/textures/grass.jpg';
+    imData = await loadImageBitmap(imageUrl);
     copyImageBitmapToTexture(device, imData, txSamplePNGs, 5)
     // scrub texture
-    imageUrl = '/textures/scrub.jpg'; 
-    imData = await loadImageBitmap(imageUrl);    
+    imageUrl = '/textures/scrub.jpg';
+    imData = await loadImageBitmap(imageUrl);
     copyImageBitmapToTexture(device, imData, txSamplePNGs, 6)
     // rubblemound texture
-    imageUrl = '/textures/rubble.jpg'; 
-    imData = await loadImageBitmap(imageUrl);    
+    imageUrl = '/textures/rubble.jpg';
+    imData = await loadImageBitmap(imageUrl);
     copyImageBitmapToTexture(device, imData, txSamplePNGs, 7)
     // dune texture
-    imageUrl = '/textures/dune_veg.jpg'; 
-    imData = await loadImageBitmap(imageUrl);    
+    imageUrl = '/textures/dune_veg.jpg';
+    imData = await loadImageBitmap(imageUrl);
     copyImageBitmapToTexture(device, imData, txSamplePNGs, 8)
     // arrow texture
-    imageUrl = '/textures/arrow.png'; 
-    imData = await loadImageBitmap(imageUrl);    
+    imageUrl = '/textures/arrow.png';
+    imData = await loadImageBitmap(imageUrl);
     copyImageBitmapToTexture(device, imData, txSamplePNGs, 9)
     // filled arrow texture
-    imageUrl = '/textures/arrow_filled.png'; 
-    imData = await loadImageBitmap(imageUrl);    
+    imageUrl = '/textures/arrow_filled.png';
+    imData = await loadImageBitmap(imageUrl);
     copyImageBitmapToTexture(device, imData, txSamplePNGs, 10)
 
     // Model textures
     // red_brick texture
-    //imageUrl = '/textures/red_brick.jpg'; 
-    //imData = await loadImageBitmap(imageUrl);    
+    //imageUrl = '/textures/red_brick.jpg';
+    //imData = await loadImageBitmap(imageUrl);
     //copyImageBitmapToTexture(device, imData, txModelPNGs, 0)
     // white_brick texture
-    //imageUrl = '/textures/white_brick.jpg'; 
-    //imData = await loadImageBitmap(imageUrl);    
+    //imageUrl = '/textures/white_brick.jpg';
+    //imData = await loadImageBitmap(imageUrl);
     //copyImageBitmapToTexture(device, imData, txModelPNGs, 1)
 
     // load skybox images into texture
     console.log('Downloading skybox images...')
     const skybox_bitmaps = await loadCubeBitmaps();
     const order = ['px','nx','py','ny','pz','nz'];  // match WebGPU’s layer order
-    
+
     order.forEach((face, layer) => {
       device.queue.copyExternalImageToTexture(
         { source: skybox_bitmaps[face] },
@@ -529,7 +550,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     } else {
         model_properties = await loadSceneModels(calc_constants.models_file_url); // load the model properties from the server side JSON file
     }
-  
+
     // A simple cube mesh centered at origin
     const boxPositions = new Float32Array([
         -1,-1,-1,  +1,-1,-1,  +1,+1,-1,  -1,+1,-1,
@@ -549,11 +570,11 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
         // left (−X)
         0,3,7,   0,7,4
       ]);
-  
+
     // convert to buffer for Box Model pipeline
     const boxVB = device.createBuffer({size: boxPositions.byteLength,usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST});
     device.queue.writeBuffer(boxVB, 0, boxPositions);
-  
+
     const boxIB = device.createBuffer({size: boxIndices.byteLength,usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST});
     device.queue.writeBuffer(boxIB, 0, boxIndices);
 
@@ -561,7 +582,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     const simWidth   = calc_constants.WIDTH  * calc_constants.dx;
     const simHeight  = calc_constants.HEIGHT * calc_constants.dy;
     const simDim = Math.sqrt(simWidth*simWidth + simHeight*simHeight);
-    
+
     // reset view (in case its stored in json already)
     calc_constants.shift_x = 0.;
     calc_constants.shift_y = 0.;
@@ -622,8 +643,8 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     var initYaw = Math.atan2(baseDir[1], baseDir[0]);
     if (calc_constants.river_sim == 1) { // river simulation
         initYaw =  Math.PI / 2.0; // river simulation yaw
-    } 
-    
+    }
+
     // if user provided yaw and pitch, you can also force them
     if (calc_constants.cameraInit_user == 1) {
         initYaw   = calc_constants.cameraInit_yaw   * Math.PI / 180.0;
@@ -856,31 +877,31 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     BoundaryPass_view.setInt32(64, calc_constants.south_boundary_type, true);           // i32
     BoundaryPass_view.setInt32(68, calc_constants.north_boundary_type, true);       // i32
     BoundaryPass_view.setFloat32(72, calc_constants.boundary_g, true);           // f32
-    BoundaryPass_view.setFloat32(76, calc_constants.delta, true);           // f32 
-    BoundaryPass_view.setInt32(80, calc_constants.boundary_shift, true);           // i32 
-    BoundaryPass_view.setFloat32(84, calc_constants.base_depth, true);           // f32 
-    BoundaryPass_view.setInt32(88, calc_constants.incident_wave_type, true);           // i32 
-    BoundaryPass_view.setFloat32(92, calc_constants.incident_wave_H, true);           // f32 
-    BoundaryPass_view.setFloat32(96, calc_constants.incident_wave_T, true);           // f32 
-    BoundaryPass_view.setFloat32(100, calc_constants.incident_wave_direction, true);           // f32 
-    BoundaryPass_view.setFloat32(104, calc_constants.mean_upstream_channel_elevation, true);           // f32 
-    BoundaryPass_view.setFloat32(108, calc_constants.channel_bottom_width, true);           // f32 
-    BoundaryPass_view.setFloat32(112, calc_constants.channel_side_slope, true);           // f32 
-    BoundaryPass_view.setFloat32(116, calc_constants.channel_bank_start_upstream, true);           // f32 
-    BoundaryPass_view.setFloat32(120, calc_constants.channel_bank_end_upstream, true);           // f32 
-    BoundaryPass_view.setFloat32(124, calc_constants.Q_10, true);           // f32 
-    BoundaryPass_view.setFloat32(128, calc_constants.Q_50, true);           // f32 
-    BoundaryPass_view.setFloat32(132, calc_constants.Q_100, true);           // f32 
-    BoundaryPass_view.setFloat32(136, calc_constants.Q_200, true);           // f32 
-    BoundaryPass_view.setFloat32(140, calc_constants.Q_500, true);           // f32 
-    BoundaryPass_view.setFloat32(144, calc_constants.stage_10, true);           // f32 
-    BoundaryPass_view.setFloat32(148, calc_constants.stage_50, true);           // f32 
-    BoundaryPass_view.setFloat32(152, calc_constants.stage_100, true);           // f32 
-    BoundaryPass_view.setFloat32(156, calc_constants.stage_200, true);           // f32 
-    BoundaryPass_view.setFloat32(160, calc_constants.stage_500, true);           // f32 
-    BoundaryPass_view.setFloat32(164, calc_constants.river_inflow_angle, true);           // f32 
+    BoundaryPass_view.setFloat32(76, calc_constants.delta, true);           // f32
+    BoundaryPass_view.setInt32(80, calc_constants.boundary_shift, true);           // i32
+    BoundaryPass_view.setFloat32(84, calc_constants.base_depth, true);           // f32
+    BoundaryPass_view.setInt32(88, calc_constants.incident_wave_type, true);           // i32
+    BoundaryPass_view.setFloat32(92, calc_constants.incident_wave_H, true);           // f32
+    BoundaryPass_view.setFloat32(96, calc_constants.incident_wave_T, true);           // f32
+    BoundaryPass_view.setFloat32(100, calc_constants.incident_wave_direction, true);           // f32
+    BoundaryPass_view.setFloat32(104, calc_constants.mean_upstream_channel_elevation, true);           // f32
+    BoundaryPass_view.setFloat32(108, calc_constants.channel_bottom_width, true);           // f32
+    BoundaryPass_view.setFloat32(112, calc_constants.channel_side_slope, true);           // f32
+    BoundaryPass_view.setFloat32(116, calc_constants.channel_bank_start_upstream, true);           // f32
+    BoundaryPass_view.setFloat32(120, calc_constants.channel_bank_end_upstream, true);           // f32
+    BoundaryPass_view.setFloat32(124, calc_constants.Q_10, true);           // f32
+    BoundaryPass_view.setFloat32(128, calc_constants.Q_50, true);           // f32
+    BoundaryPass_view.setFloat32(132, calc_constants.Q_100, true);           // f32
+    BoundaryPass_view.setFloat32(136, calc_constants.Q_200, true);           // f32
+    BoundaryPass_view.setFloat32(140, calc_constants.Q_500, true);           // f32
+    BoundaryPass_view.setFloat32(144, calc_constants.stage_10, true);           // f32
+    BoundaryPass_view.setFloat32(148, calc_constants.stage_50, true);           // f32
+    BoundaryPass_view.setFloat32(152, calc_constants.stage_100, true);           // f32
+    BoundaryPass_view.setFloat32(156, calc_constants.stage_200, true);           // f32
+    BoundaryPass_view.setFloat32(160, calc_constants.stage_500, true);           // f32
+    BoundaryPass_view.setFloat32(164, calc_constants.river_inflow_angle, true);           // f32
     BoundaryPass_view.setInt32(168, calc_constants.algochanges, true);           // i32
-    
+
     // TridiagX - Bindings & Uniforms Config
     const TridiagX_BindGroupLayout = create_Tridiag_BindGroupLayout(device);
     const TridiagX_BindGroup = create_Tridiag_BindGroup(device, TridiagX_uniformBuffer, newcoef_x, txNewState, current_stateUVstar, txtemp_PCRx, txtemp2_PCRx, txBottom);
@@ -904,7 +925,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     TridiagY_view.setInt32(12, 1, true);            // i32, hols "s"
     TridiagY_view.setInt32(16, calc_constants.Py, true);            // i32, hols "Py"
     TridiagY_view.setFloat32(20, calc_constants.delta, true);            // f32
-    
+
     // SedTrans_UpdateBottom -  Bindings & Uniforms Config
     const SedTrans_UpdateBottom_BindGroupLayout = create_SedTrans_UpdateBottom_BindGroupLayout(device);
     const SedTrans_UpdateBottom_BindGroup = create_SedTrans_UpdateBottom_BindGroup(device, SedTrans_UpdateBottom_uniformBuffer, txBottom, txBotChange_Sed, erosion_Sed, depostion_Sed, txtemp_SedTrans_Botttom, txtemp_SedTrans_Change, txHardBottom, txBottomInitial);
@@ -915,7 +936,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     SedTrans_UpdateBottom_view.setFloat32(8, calc_constants.dt, true);             // f32
     SedTrans_UpdateBottom_view.setFloat32(12, calc_constants.dx, true);       // f32
     SedTrans_UpdateBottom_view.setFloat32(16, calc_constants.dy, true);           // f32
-    SedTrans_UpdateBottom_view.setFloat32(20, calc_constants.base_depth, true);             // f32  
+    SedTrans_UpdateBottom_view.setFloat32(20, calc_constants.base_depth, true);             // f32
     SedTrans_UpdateBottom_view.setInt32(24, calc_constants.timeScheme, true);       // f32
     SedTrans_UpdateBottom_view.setInt32(28, calc_constants.pred_or_corrector, true);       // i32
     SedTrans_UpdateBottom_view.setFloat32(32, calc_constants.sedC1_n, true);           // f32
@@ -957,7 +978,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     CalcMeans_view.setFloat32(4, calc_constants.delta, true);           // f32
     CalcMeans_view.setFloat32(8, calc_constants.base_depth, true);           // f32
     CalcMeans_view.setInt32(12, calc_constants.WIDTH, true);          // i32
-    CalcMeans_view.setInt32(16, calc_constants.HEIGHT, true);          // i32  
+    CalcMeans_view.setInt32(16, calc_constants.HEIGHT, true);          // i32
     CalcMeans_view.setFloat32(20, calc_constants.dx, true);           // f32
     CalcMeans_view.setFloat32(24, calc_constants.dy, true);           // f32
 
@@ -968,7 +989,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     let CalcWaveHeight_view = new DataView(CalcWaveHeight_uniforms);
     CalcWaveHeight_view.setInt32(0, calc_constants.n_time_steps_waveheight, true);          // i32
 
-    // AddDisturbance -  Bindings & Uniforms Config 
+    // AddDisturbance -  Bindings & Uniforms Config
     const AddDisturbance_BindGroupLayout = create_AddDisturbance_BindGroupLayout(device);
     const AddDisturbance_BindGroup = create_AddDisturbance_BindGroup(device, AddDisturbance_uniformBuffer, txBottom, txstateUVstar, txBottomInitial, txtemp_AddDisturbance, txBoundaryForcing, txtemp_bottom, txBotChange_Sed);
     const AddDisturbance_uniforms = new ArrayBuffer(256);  // smallest multiple of 256s
@@ -976,29 +997,29 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     AddDisturbance_view.setInt32(0, calc_constants.WIDTH, true);          // i32
     AddDisturbance_view.setInt32(4, calc_constants.HEIGHT, true);          // i32
     AddDisturbance_view.setFloat32(8, calc_constants.dx, true);             // f32
-    AddDisturbance_view.setFloat32(12, calc_constants.dy, true);             // f32 
+    AddDisturbance_view.setFloat32(12, calc_constants.dy, true);             // f32
     AddDisturbance_view.setInt32(16, calc_constants.disturbanceType, true);             // f32
     AddDisturbance_view.setFloat32(20, calc_constants.disturbanceXpos, true);             // f32
     AddDisturbance_view.setFloat32(24, calc_constants.disturbanceYpos, true);             // f32
-    AddDisturbance_view.setFloat32(28, calc_constants.disturbanceCrestamp, true);             // f32  
-    AddDisturbance_view.setFloat32(32, calc_constants.disturbanceDir, true);             // f32  
-    AddDisturbance_view.setFloat32(36, calc_constants.disturbanceWidth, true);             // f32  
-    AddDisturbance_view.setFloat32(40, calc_constants.disturbanceLength, true);             // f32  
-    AddDisturbance_view.setFloat32(44, calc_constants.disturbanceDip, true);             // f32  
-    AddDisturbance_view.setFloat32(48, calc_constants.disturbanceRake, true);             // f32  
-    AddDisturbance_view.setFloat32(52, calc_constants.base_depth, true);             // f32  
-    AddDisturbance_view.setFloat32(56, calc_constants.g, true);             // f32  
-    AddDisturbance_view.setFloat32(60, calc_constants.dt, true);             // f32  
+    AddDisturbance_view.setFloat32(28, calc_constants.disturbanceCrestamp, true);             // f32
+    AddDisturbance_view.setFloat32(32, calc_constants.disturbanceDir, true);             // f32
+    AddDisturbance_view.setFloat32(36, calc_constants.disturbanceWidth, true);             // f32
+    AddDisturbance_view.setFloat32(40, calc_constants.disturbanceLength, true);             // f32
+    AddDisturbance_view.setFloat32(44, calc_constants.disturbanceDip, true);             // f32
+    AddDisturbance_view.setFloat32(48, calc_constants.disturbanceRake, true);             // f32
+    AddDisturbance_view.setFloat32(52, calc_constants.base_depth, true);             // f32
+    AddDisturbance_view.setFloat32(56, calc_constants.g, true);             // f32
+    AddDisturbance_view.setFloat32(60, calc_constants.dt, true);             // f32
     AddDisturbance_view.setFloat32(64, 0.0,true);             // f32  will be time
-    AddDisturbance_view.setFloat32(68, calc_constants.disturbance_change_timescale,true);             // f32  
-    AddDisturbance_view.setFloat32(72, calc_constants.disturbance_time_shift,true);             // f32  
-    AddDisturbance_view.setFloat32(76, calc_constants.disturbance_max_distance,true);             // f32  
-    AddDisturbance_view.setFloat32(80, calc_constants.disturbance_initial_traj,true);             // f32  
-    AddDisturbance_view.setFloat32(84, calc_constants.disturbance_traj_timefactor,true);             // f32  
-    AddDisturbance_view.setFloat32(88, calc_constants.disturbance_final_traj,true);             // f32  
-    AddDisturbance_view.setFloat32(92, calc_constants.disturbance_expo,true);             // f32  
-    AddDisturbance_view.setFloat32(96, calc_constants.disturbance_vol_data,true);             // f32  
-    AddDisturbance_view.setFloat32(100, calc_constants.disturbance_gamma_val,true);             // f32  
+    AddDisturbance_view.setFloat32(68, calc_constants.disturbance_change_timescale,true);             // f32
+    AddDisturbance_view.setFloat32(72, calc_constants.disturbance_time_shift,true);             // f32
+    AddDisturbance_view.setFloat32(76, calc_constants.disturbance_max_distance,true);             // f32
+    AddDisturbance_view.setFloat32(80, calc_constants.disturbance_initial_traj,true);             // f32
+    AddDisturbance_view.setFloat32(84, calc_constants.disturbance_traj_timefactor,true);             // f32
+    AddDisturbance_view.setFloat32(88, calc_constants.disturbance_final_traj,true);             // f32
+    AddDisturbance_view.setFloat32(92, calc_constants.disturbance_expo,true);             // f32
+    AddDisturbance_view.setFloat32(96, calc_constants.disturbance_vol_data,true);             // f32
+    AddDisturbance_view.setFloat32(100, calc_constants.disturbance_gamma_val,true);             // f32
 
     // MouseClickChange -  Bindings & Uniforms Config
     const MouseClickChange_BindGroupLayout = create_MouseClickChange_BindGroupLayout(device);
@@ -1012,19 +1033,19 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     MouseClickChange_view.setFloat32(16, calc_constants.xClick, true);             // f32
     MouseClickChange_view.setFloat32(20, calc_constants.yClick, true);             // f32
     MouseClickChange_view.setFloat32(24, calc_constants.changeRadius, true);             // f32
-    MouseClickChange_view.setFloat32(28, calc_constants.changeAmplitude, true);             // f32  
-    MouseClickChange_view.setInt32(32, calc_constants.surfaceToChange, true);             // i32  
-    MouseClickChange_view.setInt32(36, calc_constants.changeType, true);             // i32  
-    MouseClickChange_view.setFloat32(40, calc_constants.base_depth, true);             // f32 
-    MouseClickChange_view.setInt32(44, calc_constants.whichPanelisOpen, true);             // i32  
-    MouseClickChange_view.setInt32(48, calc_constants.designcomponentToAdd, true);             // i32  
-    MouseClickChange_view.setFloat32(52, calc_constants.designcomponent_Radius, true);             // f32  
-    MouseClickChange_view.setFloat32(56, calc_constants.designcomponent_Friction, true);             // f32  
-    MouseClickChange_view.setFloat32(60, calc_constants.changeSeaLevel_delta, true);             // f32  
+    MouseClickChange_view.setFloat32(28, calc_constants.changeAmplitude, true);             // f32
+    MouseClickChange_view.setInt32(32, calc_constants.surfaceToChange, true);             // i32
+    MouseClickChange_view.setInt32(36, calc_constants.changeType, true);             // i32
+    MouseClickChange_view.setFloat32(40, calc_constants.base_depth, true);             // f32
+    MouseClickChange_view.setInt32(44, calc_constants.whichPanelisOpen, true);             // i32
+    MouseClickChange_view.setInt32(48, calc_constants.designcomponentToAdd, true);             // i32
+    MouseClickChange_view.setFloat32(52, calc_constants.designcomponent_Radius, true);             // f32
+    MouseClickChange_view.setFloat32(56, calc_constants.designcomponent_Friction, true);             // f32
+    MouseClickChange_view.setFloat32(60, calc_constants.changeSeaLevel_delta, true);             // f32
 
     // ExtractTimeSeries -  Bindings & Uniforms Config
     const ExtractTimeSeries_BindGroupLayout = create_ExtractTimeSeries_BindGroupLayout(device);
-    const ExtractTimeSeries_BindGroup = create_ExtractTimeSeries_BindGroup(device, ExtractTimeSeries_uniformBuffer, txBottom, txBottomFriction, txContSource, txState, txWaveHeight, txTimeSeries_Locations, txTimeSeries_Data, txMeans_Speed);
+    const ExtractTimeSeries_BindGroup = create_ExtractTimeSeries_BindGroup(device, ExtractTimeSeries_uniformBuffer, txBottom, txBottomFriction, txContSource, txState, txWaveHeight, txTimeSeries_Locations, txTimeSeries_Data, txMeans_Speed, txModelVelocities);
     const ExtractTimeSeries_uniforms = new ArrayBuffer(256);  // smallest multiple of 256s
     let ExtractTimeSeries_view = new DataView(ExtractTimeSeries_uniforms);
     ExtractTimeSeries_view.setInt32(0, calc_constants.WIDTH, true);          // i32
@@ -1033,9 +1054,27 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     ExtractTimeSeries_view.setFloat32(12, calc_constants.dy, true);             // f32
     ExtractTimeSeries_view.setInt32(16, calc_constants.mouse_current_canvas_indX, true);             // i32
     ExtractTimeSeries_view.setInt32(20, calc_constants.mouse_current_canvas_indY, true);             // i32
-    ExtractTimeSeries_view.setFloat32(24, 0.0, true);             // f32, total_time 
+    ExtractTimeSeries_view.setFloat32(24, 0.0, true);             // f32, total_time
     ExtractTimeSeries_view.setInt32(28, calc_constants.river_sim, true);             // i32
     ExtractTimeSeries_view.setInt32(32, calc_constants.disturbanceType, true);             // i32
+
+    // AdvectParticles - Bindings & Uniforms Config
+    const AdvectParticles_BindGroupLayout = create_AdvectParticles_BindGroupLayout(device);
+    const AdvectParticles_BindGroup = create_AdvectParticles_BindGroup(device, AdvectParticles_uniformBuffer, txParticles, txModelVelocities, txtemp_Particles);
+    const AdvectParticles_uniforms = new ArrayBuffer(256);
+    let AdvectParticles_view = new DataView(AdvectParticles_uniforms);
+    AdvectParticles_view.setInt32(0, calc_constants.WIDTH, true);
+    AdvectParticles_view.setInt32(4, calc_constants.HEIGHT, true);
+    AdvectParticles_view.setFloat32(8, calc_constants.dx, true);
+    AdvectParticles_view.setFloat32(12, calc_constants.dy, true);
+    AdvectParticles_view.setFloat32(16, calc_constants.dt, true);
+    AdvectParticles_view.setFloat32(20, calc_constants.lagrangianK, true);
+    AdvectParticles_view.setInt32(24, calc_constants.NumberOfParticles, true);
+    AdvectParticles_view.setInt32(28, calc_constants.lagrangianEvolve, true);
+    AdvectParticles_view.setUint32(32, calc_constants.lagrangianFrame, true);
+    AdvectParticles_view.setFloat32(36, calc_constants.delta, true);
+    AdvectParticles_view.setFloat32(40, calc_constants.WIDTH * calc_constants.dx, true);
+    AdvectParticles_view.setFloat32(44, calc_constants.HEIGHT * calc_constants.dy, true);
 
     // Skybox Bindings
     const SkyboxBindGroupLayout = createSkyboxBindGroupLayout(device);
@@ -1057,14 +1096,14 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     for (const obj of model_properties) {
         // one unique GPUBuffer
         const Model_uniformBuffer_obj = createUniformBuffer(device);
-    
+
         // one unique BindGroup pointing at that buffer
         const ModelBindGroup_obj = createModelBindGroup(device, Model_uniformBuffer_obj, txModelPNGs.createView(), textureSampler_linear);
-    
+
         // host-side storage for packing uniforms
         const Model_uniforms_obj = new ArrayBuffer(256);
         const Model_view_obj     = new DataView(Model_uniforms_obj);
-    
+
         // attach them to the object
         obj.uniformBuffer = Model_uniformBuffer_obj;
         obj.bindGroup     = ModelBindGroup_obj;
@@ -1090,49 +1129,49 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     Render_view.setFloat32(40, calc_constants.dx, true);          // f32
     Render_view.setFloat32(44, calc_constants.dy, true);          // f32
     Render_view.setInt32(48, calc_constants.WIDTH, true);          // i32
-    Render_view.setInt32(52, calc_constants.HEIGHT, true);          // i32  
-    Render_view.setFloat32(56, calc_constants.rotationAngle_xy, true);          // f32  
-    Render_view.setFloat32(60, calc_constants.shift_x, true);          // f32  
-    Render_view.setFloat32(64, calc_constants.shift_y, true);          // f32  
-    Render_view.setFloat32(68, calc_constants.forward, true);          // f32  
-    Render_view.setFloat32(72, calc_constants.canvas_width_ratio, true);          // f32 
-    Render_view.setFloat32(76, calc_constants.canvas_height_ratio, true);          // f32 
+    Render_view.setInt32(52, calc_constants.HEIGHT, true);          // i32
+    Render_view.setFloat32(56, calc_constants.rotationAngle_xy, true);          // f32
+    Render_view.setFloat32(60, calc_constants.shift_x, true);          // f32
+    Render_view.setFloat32(64, calc_constants.shift_y, true);          // f32
+    Render_view.setFloat32(68, calc_constants.forward, true);          // f32
+    Render_view.setFloat32(72, calc_constants.canvas_width_ratio, true);          // f32
+    Render_view.setFloat32(76, calc_constants.canvas_height_ratio, true);          // f32
     Render_view.setFloat32(80, calc_constants.delta, true);           // f32
-    Render_view.setInt32(84, calc_constants.CB_show, true);          // i32  
-    Render_view.setFloat32(88, calc_constants.CB_xbuffer_uv, true);          // i32  
-    Render_view.setFloat32(92, calc_constants.CB_xstart_uv, true);          // i32  
-    Render_view.setFloat32(96, calc_constants.CB_width_uv, true);          // i32  
-    Render_view.setInt32(100, calc_constants.CB_ystart, true);          // i32  
-    Render_view.setInt32(104, calc_constants.CB_label_height, true);          // i32  
-    Render_view.setFloat32(108, calc_constants.base_depth, true);             // f32  
-    Render_view.setInt32(112, calc_constants.NumberOfTimeSeries, true);             // i32  
+    Render_view.setInt32(84, calc_constants.CB_show, true);          // i32
+    Render_view.setFloat32(88, calc_constants.CB_xbuffer_uv, true);          // i32
+    Render_view.setFloat32(92, calc_constants.CB_xstart_uv, true);          // i32
+    Render_view.setFloat32(96, calc_constants.CB_width_uv, true);          // i32
+    Render_view.setInt32(100, calc_constants.CB_ystart, true);          // i32
+    Render_view.setInt32(104, calc_constants.CB_label_height, true);          // i32
+    Render_view.setFloat32(108, calc_constants.base_depth, true);             // f32
+    Render_view.setInt32(112, calc_constants.NumberOfTimeSeries, true);             // i32
     Render_view.setFloat32(116, 0.0, true);             // f32  will be time
     Render_view.setInt32(120, calc_constants.west_boundary_type, true);       // i32
     Render_view.setInt32(124, calc_constants.east_boundary_type, true);           // i32
     Render_view.setInt32(128, calc_constants.south_boundary_type, true);           // i32
     Render_view.setInt32(132, calc_constants.north_boundary_type, true);       // i32
-    Render_view.setFloat32(136, calc_constants.designcomponent_Fric_Coral, true);          // f32 
-    Render_view.setFloat32(140, calc_constants.designcomponent_Fric_Oyser, true);          // f32 
-    Render_view.setFloat32(144, calc_constants.designcomponent_Fric_Mangrove, true);          // f32 
-    Render_view.setFloat32(148, calc_constants.designcomponent_Fric_Kelp, true);          // f32 
-    Render_view.setFloat32(152, calc_constants.designcomponent_Fric_Grass, true);          // f32 
-    Render_view.setFloat32(156, calc_constants.designcomponent_Fric_Scrub, true);          // f32 
-    Render_view.setFloat32(160, calc_constants.designcomponent_Fric_RubbleMound, true);          // f32 
-    Render_view.setFloat32(164, calc_constants.designcomponent_Fric_Dune, true);          // f32 
-    Render_view.setFloat32(168, calc_constants.designcomponent_Fric_Berm, true);          // f32 
-    Render_view.setFloat32(172, calc_constants.designcomponent_Fric_Seawall, true);          // f32 
-    Render_view.setFloat32(176, calc_constants.bathy_cmap_zero, true);          // f32 
-    Render_view.setFloat32(180, calc_constants.renderZScale, true);          // f32        // f32 
-    Render_view.setFloat32(184, 0.0, true);          // f32        // f32 
-    Render_view.setFloat32(188, 0.0, true);          // f32 
+    Render_view.setFloat32(136, calc_constants.designcomponent_Fric_Coral, true);          // f32
+    Render_view.setFloat32(140, calc_constants.designcomponent_Fric_Oyser, true);          // f32
+    Render_view.setFloat32(144, calc_constants.designcomponent_Fric_Mangrove, true);          // f32
+    Render_view.setFloat32(148, calc_constants.designcomponent_Fric_Kelp, true);          // f32
+    Render_view.setFloat32(152, calc_constants.designcomponent_Fric_Grass, true);          // f32
+    Render_view.setFloat32(156, calc_constants.designcomponent_Fric_Scrub, true);          // f32
+    Render_view.setFloat32(160, calc_constants.designcomponent_Fric_RubbleMound, true);          // f32
+    Render_view.setFloat32(164, calc_constants.designcomponent_Fric_Dune, true);          // f32
+    Render_view.setFloat32(168, calc_constants.designcomponent_Fric_Berm, true);          // f32
+    Render_view.setFloat32(172, calc_constants.designcomponent_Fric_Seawall, true);          // f32
+    Render_view.setFloat32(176, calc_constants.bathy_cmap_zero, true);          // f32
+    Render_view.setFloat32(180, calc_constants.renderZScale, true);          // f32        // f32
+    Render_view.setInt32(184, calc_constants.NumberOfParticles, true);          // i32
+    Render_view.setInt32(188, calc_constants.maxNumberOfTimeSeries, true);          // i32 particleTexBase
     // add new viewProj mat4 for drone view
     for (let i = 0; i < 16; ++i) {
         // offset = 192 + 4 bytes per float × i
         Render_view.setFloat32(192 + i * 4, viewProj[i], /* littleEndian */ true);
     }
     Render_view.setInt32(256, calc_constants.ShowArrows, true);           // i32
-    Render_view.setFloat32(260, calc_constants.arrow_scale, true);          // f32 
-    Render_view.setFloat32(264, calc_constants.arrow_density, true);          // f32 
+    Render_view.setFloat32(260, calc_constants.arrow_scale, true);          // f32
+    Render_view.setFloat32(264, calc_constants.arrow_density, true);          // f32
     Render_view.setFloat32(268, calc_constants.disturbanceType, true);          // f32
 
     // Copy f32 data to f16 texture compute shader
@@ -1157,11 +1196,11 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     var Pass2_ShaderCode = null;
     if (calc_constants.Accuracy_mode == 1) {
         console.log("Using HLLC Flux Solver in Pass2");
-        Pass2_ShaderCode = await fetchShader('/shaders/Pass2_HighOrder_HLLC.wgsl');  
+        Pass2_ShaderCode = await fetchShader('/shaders/Pass2_HighOrder_HLLC.wgsl');
     } else {
-        Pass2_ShaderCode = await fetchShader('/shaders/Pass2.wgsl');  
+        Pass2_ShaderCode = await fetchShader('/shaders/Pass2.wgsl');
     }
-    const PassBreaking_ShaderCode = await fetchShader('/shaders/Pass_Breaking.wgsl'); 
+    const PassBreaking_ShaderCode = await fetchShader('/shaders/Pass_Breaking.wgsl');
     const Pass3A_Coulwave_ShaderCode= await fetchShader('/shaders/Pass3A_COULWAVE.wgsl')
     const Pass3B_Coulwave_ShaderCode= await fetchShader('/shaders/Pass3B_COULWAVE.wgsl')
     const Pass3_ShaderCode_NLSW = await fetchShader('/shaders/Pass3_NLSW.wgsl')
@@ -1173,11 +1212,11 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
         console.log("Using COULWAVE equations in Boussinesq mode");
         Pass3_ShaderCode_Bous = await fetchShader('/shaders/Pass3_COULWAVE.wgsl');
     }
-    
+
     const SedTrans_Pass1_ShaderCode = await fetchShader('/shaders/SedTrans_Pass1.wgsl');
     const SedTrans_Pass3_ShaderCode = await fetchShader('/shaders/SedTrans_Pass3.wgsl')
     const BoundaryPass_ShaderCode = await fetchShader('/shaders/BoundaryPass.wgsl');
-    
+
     var TridiagX_ShaderCode = null; var TridiagY_ShaderCode = null;  //we can likely fold thee back into a single shader
     if (calc_constants.NLSW_or_Bous == 2) {
         TridiagX_ShaderCode = await fetchShader('/shaders/TriDiag_PCRx_COULWAVE.wgsl');
@@ -1189,7 +1228,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
 
     const SedTrans_UpdateBottom_ShaderCode = await fetchShader('/shaders/SedTrans_UpdateBottom.wgsl');
     const Updateneardry_ShaderCode = await fetchShader('/shaders/Update_neardry.wgsl');
-    
+
     var UpdateTrid_ShaderCode = null;  // we can likely fold these back into a single shader
     if (calc_constants.NLSW_or_Bous == 2) {
         UpdateTrid_ShaderCode = await fetchShader('/shaders/Update_TriDiag_coef_COULWAVE.wgsl');
@@ -1202,6 +1241,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     const AddDisturbance_ShaderCode = await fetchShader('/shaders/AddDisturbance.wgsl');
     const MouseClickChange_ShaderCode = await fetchShader('/shaders/MouseClickChange.wgsl');
     const ExtractTimeSeries_ShaderCode = await fetchShader('/shaders/ExtractTimeSeries.wgsl');
+    const AdvectParticles_ShaderCode = await fetchShader('/shaders/AdvectParticles.wgsl');
 
     const Skybox_vertexShaderCode = await fetchShader('/shaders/skybox.vertex.wgsl');
     const Skybox_fragmentShaderCode = await fetchShader('/shaders/skybox.fragment.wgsl');
@@ -1239,11 +1279,12 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     const AddDisturbance_Pipeline = createComputePipeline(device, AddDisturbance_ShaderCode, AddDisturbance_BindGroupLayout, allComputePipelines);
     const MouseClickChange_Pipeline = createComputePipeline(device, MouseClickChange_ShaderCode, MouseClickChange_BindGroupLayout, allComputePipelines);
     const ExtractTimeSeries_Pipeline = createComputePipeline(device, ExtractTimeSeries_ShaderCode, ExtractTimeSeries_BindGroupLayout, allComputePipelines);
+    const AdvectParticles_Pipeline = createComputePipeline(device, AdvectParticles_ShaderCode, AdvectParticles_BindGroupLayout, allComputePipelines);
 
     const SkyboxPipeline = createSkyboxPipeline(device, Skybox_vertexShaderCode, Skybox_fragmentShaderCode, swapChainFormat, SkyboxBindGroupLayout);
     //const DuckPipeline = createDuckPipeline(device, Duck_vertexShaderCode, Duck_fragmentShaderCode, swapChainFormat, DuckBindGroupLayout);
     const ModelPipeline = createModelPipeline(device, Model_vertexShaderCode, Model_fragmentShaderCode, swapChainFormat, ModelBindGroupLayout);
-    
+
     const RenderPipeline_quad = createRenderPipeline(device, vertexShaderCode, fragmentShaderCode, swapChainFormat, RenderBindGroupLayout, 'depth24plus');
     const RenderPipeline_vertexgrid = createRenderPipeline_vertexgrid(device, vertex3DShaderCode, fragmentShaderCode, swapChainFormat, RenderBindGroupLayout, 'depth24plus');
     var RenderPipeline = RenderPipeline_quad;
@@ -1297,7 +1338,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     // The render pipeline will render a full-screen quad. This section of code sets up the vertices for that quad.
 
     // Define the vertices for a full-screen quad. This is for the plan view, design mode
-    // The quad covers the entire screen with coordinates from (-1,-1) to (1,1). 
+    // The quad covers the entire screen with coordinates from (-1,-1) to (1,1).
     // It's made of two triangles: one from Vertex 0-1-2 and another from Vertex 2-1-3.
     const quadVertices = new Float32Array([
         -1.0, -1.0,   // bottom-left  -> Vertex 0
@@ -1306,7 +1347,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
         1.0, 1.0      // top-right    -> Vertex 3
     ]);
 
-    // Create a GPU buffer to hold the quad's vertices. 
+    // Create a GPU buffer to hold the quad's vertices.
     // The buffer is created with the `VERTEX` usage, indicating it will be used to store vertex data.
     // `mappedAtCreation` being set to `true` means we want immediate access to write to the buffer.
     const quadVertexBuffer = device.createBuffer({
@@ -1352,7 +1393,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     });
     new Float32Array(gridVertexBuffer.getMappedRange()).set(gridVertices);
     gridVertexBuffer.unmap();
-    
+
     // Log that the buffers have been set up.
     console.log("Buffers set up.");
 
@@ -1388,7 +1429,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     ctx.fillStyle = 'white';
     ctx.fillRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
     // create initial colorbar
-    
+
     var logo_left = await loadImage('./logo_USACE.png');
     var logo_right = await loadImage('./logo_USC.png');
     if (calc_constants.river_sim == 1){
@@ -1399,6 +1440,10 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
     update_colorbar(device, offscreenCanvas, ctx, calc_constants, txDraw, logo_left, logo_right)
 
     console.log("Compute / Render loop starting.");
+    const lagrangianKInputLive = document.getElementById('lagrangianK-input');
+    if (lagrangianKInputLive) {
+        lagrangianKInputLive.value = calc_constants.lagrangianK;
+    }
     // This function, `frame`, serves as the main loop of the application,
     // executing repeatedly to update simulation state and render the results.
 
@@ -1472,7 +1517,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
         if (frame_count == 0) {
             runCopyTextures(device, calc_constants, txBottom, txBottomInitial)
         }
-        
+
         // store baseline wave height map
         if (calc_constants.save_baseline == 1) {
             runCopyTextures(device, calc_constants, txWaveHeight, txBaseline_WaveHeight)
@@ -1488,8 +1533,8 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
 
             calc_constants.sedC1_erosion = calc_constants.sedC1_psi*Math.pow(calc_constants.sedC1_d50/1000.,-0.2);
             calc_constants.sedC1_shields = 1.0 / ( (calc_constants.sedC1_denrat - 1.0) * 9.81 * calc_constants.sedC1_d50/1000.);
-            let fall_vel_a = 4.0 / 3.0 * 9.81 * calc_constants.sedC1_d50/1000. / 0.2 * (calc_constants.sedC1_denrat - 1.0); 
-            calc_constants.sedC1_fallvel = Math.pow(fall_vel_a, 0.5);            
+            let fall_vel_a = 4.0 / 3.0 * 9.81 * calc_constants.sedC1_d50/1000. / 0.2 * (calc_constants.sedC1_denrat - 1.0);
+            calc_constants.sedC1_fallvel = Math.pow(fall_vel_a, 0.5);
 
             Pass1_view.setFloat32(20, calc_constants.TWO_THETA, true);           // f32
             Pass1_view.setFloat32(32, calc_constants.dt, true);           // f32
@@ -1527,7 +1572,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
             SedTrans_UpdateBottom_view.setFloat32(8, calc_constants.dt, true);             // f32
             SedTrans_UpdateBottom_view.setInt32(24, calc_constants.timeScheme, true);       // f32
             SedTrans_UpdateBottom_view.setInt32(28, calc_constants.pred_or_corrector, true);       // i32
-            SedTrans_UpdateBottom_view.setFloat32(32, calc_constants.sedC1_n, true);           // f32            
+            SedTrans_UpdateBottom_view.setFloat32(32, calc_constants.sedC1_n, true);           // f32
 
             if(calc_constants.clearConc == 1){  // remove all passive tracer sources when changing overlay
                 runCopyTextures(device, calc_constants, txzeros, txContSource)
@@ -1536,11 +1581,11 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
             // make sure periodic conditions are always a pair
             if(calc_constants.west_boundary_type == 3 || calc_constants.east_boundary_type == 3){
                 calc_constants.west_boundary_type = 3;
-                calc_constants.east_boundary_type = 3; 
+                calc_constants.east_boundary_type = 3;
             }
             if(calc_constants.south_boundary_type == 3 || calc_constants.north_boundary_type == 3){
                 calc_constants.south_boundary_type = 3;
-                calc_constants.north_boundary_type = 3; 
+                calc_constants.north_boundary_type = 3;
             }
             BoundaryPass_view.setFloat32(8, calc_constants.dt, true);             // f32
             BoundaryPass_view.setFloat32(40, calc_constants.seaLevel, true);           // f32
@@ -1548,29 +1593,29 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
             BoundaryPass_view.setInt32(60, calc_constants.east_boundary_type, true);           // f32
             BoundaryPass_view.setInt32(64, calc_constants.south_boundary_type, true);           // f32
             BoundaryPass_view.setInt32(68, calc_constants.north_boundary_type, true);       // f32
-            BoundaryPass_view.setInt32(88, calc_constants.incident_wave_type, true);           // i32 
-            BoundaryPass_view.setFloat32(92, calc_constants.incident_wave_H, true);           // f32 
-            BoundaryPass_view.setFloat32(96, calc_constants.incident_wave_T, true);           // f32 
-            BoundaryPass_view.setFloat32(100, calc_constants.incident_wave_direction, true);   
-            
+            BoundaryPass_view.setInt32(88, calc_constants.incident_wave_type, true);           // i32
+            BoundaryPass_view.setFloat32(92, calc_constants.incident_wave_H, true);           // f32
+            BoundaryPass_view.setFloat32(96, calc_constants.incident_wave_T, true);           // f32
+            BoundaryPass_view.setFloat32(100, calc_constants.incident_wave_direction, true);
+
             Pass3_view.setInt32(128, calc_constants.west_boundary_type, true);       // i32
             Pass3_view.setInt32(132, calc_constants.east_boundary_type, true);           // i32
             Pass3_view.setInt32(136, calc_constants.south_boundary_type, true);           // i32
-            Pass3_view.setInt32(140, calc_constants.north_boundary_type, true);       // i32// f32 
+            Pass3_view.setInt32(140, calc_constants.north_boundary_type, true);       // i32// f32
 
             if(calc_constants.OverlayUpdate == 1) {   // overlay image option has been changed, need to update.
                 calc_constants.OverlayUpdate = 0;
                 calc_constants.IsOverlayMapLoaded = 0;  // reset to zero, if this doesnt change, then no overlay
                 if (calc_constants.GoogleMapOverlay == 1 && calc_constants.IsGMMapLoaded == 1) {  // if using GM overlay, if this exists, it has already been loaded
-   
+
                     calc_constants.GMscaleX = transforms.scaleX;
                     calc_constants.GMscaleY = transforms.scaleY;
                     calc_constants.GMoffsetX = transforms.offsetX;
                     calc_constants.GMoffsetY = transforms.offsetY;
-            
+
                     txOverlayMap = txGoogleMap;
-                    RenderBindGroup = createRenderBindGroup(device, Render_uniformBuffer, txNewState, txBottom, txMeans, txWaveHeight, txBaseline_WaveHeight, txBottomFriction, txNewState_Sed, erosion_Sed, depostion_Sed, txBotChange_Sed, txOverlayMap, txDraw, textureSampler, txTimeSeries_Locations, txBreaking, txSamplePNGs);
-   
+                    RenderBindGroup = createRenderBindGroup(device, Render_uniformBuffer, txNewState, txBottom, txMeans, txWaveHeight, txBaseline_WaveHeight, txBottomFriction, txNewState_Sed, erosion_Sed, depostion_Sed, txBotChange_Sed, txOverlayMap, txDraw, textureSampler, txTimeSeries_Locations, txBreaking, txSamplePNGs, textureSampler_linear, txRenderVarsf16);
+
                     console.log('Updating Overlay with Google Maps Image')
                     calc_constants.IsOverlayMapLoaded = 1;
                 } else if (calc_constants.GoogleMapOverlay == 2 && calc_constants.IsSatMapLoaded == 1) {  // if using Sat overlay
@@ -1578,10 +1623,10 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                     calc_constants.GMscaleY = -1.0; // y-direction scaling factor to make sat image align with numerical domain
                     calc_constants.GMoffsetX = 0.0;  // x-direction offset for sat image
                     calc_constants.GMoffsetY = 1.0;  // y-direction offset for sat image
-                    
+
                     txOverlayMap = txSatMap;
-                    RenderBindGroup = createRenderBindGroup(device, Render_uniformBuffer, txNewState, txBottom, txMeans, txWaveHeight, txBaseline_WaveHeight, txBottomFriction, txNewState_Sed, erosion_Sed, depostion_Sed, txBotChange_Sed, txOverlayMap, txDraw, textureSampler, txTimeSeries_Locations, txBreaking, txSamplePNGs);
-   
+                    RenderBindGroup = createRenderBindGroup(device, Render_uniformBuffer, txNewState, txBottom, txMeans, txWaveHeight, txBaseline_WaveHeight, txBottomFriction, txNewState_Sed, erosion_Sed, depostion_Sed, txBotChange_Sed, txOverlayMap, txDraw, textureSampler, txTimeSeries_Locations, txBreaking, txSamplePNGs, textureSampler_linear, txRenderVarsf16);
+
                     console.log('Updating Overlay with Sat Image')
                     calc_constants.IsOverlayMapLoaded = 1;
                 }
@@ -1597,23 +1642,23 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
             Render_view.setFloat32(28, calc_constants.GMscaleY, true);          // f32
             Render_view.setFloat32(32, calc_constants.GMoffsetX, true);          // f32
             Render_view.setFloat32(36, calc_constants.GMoffsetY, true);          // f32
-            Render_view.setFloat32(72, calc_constants.canvas_width_ratio, true);          // f32 
-            Render_view.setFloat32(76, calc_constants.canvas_height_ratio, true);          // f32 
-            Render_view.setInt32(112, calc_constants.NumberOfTimeSeries, true);             // i32  
-            Render_view.setFloat32(136, calc_constants.designcomponent_Fric_Coral, true);          // f32 
-            Render_view.setFloat32(140, calc_constants.designcomponent_Fric_Oyser, true);          // f32 
-            Render_view.setFloat32(144, calc_constants.designcomponent_Fric_Mangrove, true);          // f32 
-            Render_view.setFloat32(148, calc_constants.designcomponent_Fric_Kelp, true);          // f32 
-            Render_view.setFloat32(152, calc_constants.designcomponent_Fric_Grass, true);          // f32 
-            Render_view.setFloat32(156, calc_constants.designcomponent_Fric_Scrub, true);          // f32 
-            Render_view.setFloat32(160, calc_constants.designcomponent_Fric_RubbleMound, true);          // f32 
-            Render_view.setFloat32(164, calc_constants.designcomponent_Fric_Dune, true);          // f32 
-            Render_view.setFloat32(168, calc_constants.designcomponent_Fric_Berm, true);          // f32 
-            Render_view.setFloat32(172, calc_constants.designcomponent_Fric_Seawall, true);          // f32    
+            Render_view.setFloat32(72, calc_constants.canvas_width_ratio, true);          // f32
+            Render_view.setFloat32(76, calc_constants.canvas_height_ratio, true);          // f32
+            Render_view.setInt32(112, calc_constants.NumberOfTimeSeries, true);             // i32
+            Render_view.setFloat32(136, calc_constants.designcomponent_Fric_Coral, true);          // f32
+            Render_view.setFloat32(140, calc_constants.designcomponent_Fric_Oyser, true);          // f32
+            Render_view.setFloat32(144, calc_constants.designcomponent_Fric_Mangrove, true);          // f32
+            Render_view.setFloat32(148, calc_constants.designcomponent_Fric_Kelp, true);          // f32
+            Render_view.setFloat32(152, calc_constants.designcomponent_Fric_Grass, true);          // f32
+            Render_view.setFloat32(156, calc_constants.designcomponent_Fric_Scrub, true);          // f32
+            Render_view.setFloat32(160, calc_constants.designcomponent_Fric_RubbleMound, true);          // f32
+            Render_view.setFloat32(164, calc_constants.designcomponent_Fric_Dune, true);          // f32
+            Render_view.setFloat32(168, calc_constants.designcomponent_Fric_Berm, true);          // f32
+            Render_view.setFloat32(172, calc_constants.designcomponent_Fric_Seawall, true);          // f32
             Render_view.setInt32(256, calc_constants.ShowArrows, true);           // i32
-            Render_view.setFloat32(260, calc_constants.arrow_scale, true);          // f32 
-            Render_view.setFloat32(264, calc_constants.arrow_density, true);          // f32          
-            
+            Render_view.setFloat32(260, calc_constants.arrow_scale, true);          // f32
+            Render_view.setFloat32(264, calc_constants.arrow_density, true);          // f32
+
             // reset canvas
             ctx.fillStyle = 'white';
             ctx.fillRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
@@ -1629,27 +1674,28 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
         if (calc_constants.click_update > 0) {
 
             if (calc_constants.click_update == 1 && calc_constants.viewType == 1) {
+                if (!isPlacingLagrangian()) {
                 MouseClickChange_view.setFloat32(16, calc_constants.xClick, true);             // f32
                 MouseClickChange_view.setFloat32(20, calc_constants.yClick, true);             // f32
                 MouseClickChange_view.setFloat32(24, calc_constants.changeRadius, true);             // f32
                 MouseClickChange_view.setFloat32(28, calc_constants.changeAmplitude, true);             // f32
-                MouseClickChange_view.setInt32(32, calc_constants.surfaceToChange, true);             // f32  
-                MouseClickChange_view.setInt32(36, calc_constants.changeType, true);             // i32  
-                MouseClickChange_view.setInt32(44, calc_constants.whichPanelisOpen, true);             // i32  
-                MouseClickChange_view.setInt32(48, calc_constants.designcomponentToAdd, true);             // i32  
-                MouseClickChange_view.setFloat32(52, calc_constants.designcomponent_Radius, true);             // f32 
-                if(calc_constants.designcomponentToAdd == 1) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Coral;} 
-                else if(calc_constants.designcomponentToAdd == 2) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Oyser;} 
-                else if(calc_constants.designcomponentToAdd == 3) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Mangrove;} 
-                else if(calc_constants.designcomponentToAdd == 4) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Kelp;} 
-                else if(calc_constants.designcomponentToAdd == 5) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Grass;} 
-                else if(calc_constants.designcomponentToAdd == 6) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Scrub;} 
-                else if(calc_constants.designcomponentToAdd == 7) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_RubbleMound;} 
-                else if(calc_constants.designcomponentToAdd == 8) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Dune;} 
-                else if(calc_constants.designcomponentToAdd == 9) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Berm;} 
-                else if(calc_constants.designcomponentToAdd == 10) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Seawall;} 
-                MouseClickChange_view.setFloat32(56, calc_constants.designcomponent_Friction, true);             // f32  
-                MouseClickChange_view.setFloat32(60, calc_constants.changeSeaLevel_delta, true);             // f32  
+                MouseClickChange_view.setInt32(32, calc_constants.surfaceToChange, true);             // f32
+                MouseClickChange_view.setInt32(36, calc_constants.changeType, true);             // i32
+                MouseClickChange_view.setInt32(44, calc_constants.whichPanelisOpen, true);             // i32
+                MouseClickChange_view.setInt32(48, calc_constants.designcomponentToAdd, true);             // i32
+                MouseClickChange_view.setFloat32(52, calc_constants.designcomponent_Radius, true);             // f32
+                if(calc_constants.designcomponentToAdd == 1) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Coral;}
+                else if(calc_constants.designcomponentToAdd == 2) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Oyser;}
+                else if(calc_constants.designcomponentToAdd == 3) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Mangrove;}
+                else if(calc_constants.designcomponentToAdd == 4) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Kelp;}
+                else if(calc_constants.designcomponentToAdd == 5) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Grass;}
+                else if(calc_constants.designcomponentToAdd == 6) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Scrub;}
+                else if(calc_constants.designcomponentToAdd == 7) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_RubbleMound;}
+                else if(calc_constants.designcomponentToAdd == 8) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Dune;}
+                else if(calc_constants.designcomponentToAdd == 9) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Berm;}
+                else if(calc_constants.designcomponentToAdd == 10) {calc_constants.designcomponent_Friction = calc_constants.designcomponent_Fric_Seawall;}
+                MouseClickChange_view.setFloat32(56, calc_constants.designcomponent_Friction, true);             // f32
+                MouseClickChange_view.setFloat32(60, calc_constants.changeSeaLevel_delta, true);             // f32
                 calc_constants.changeSeaLevel_delta = 0.0; // once the change is added once, set to zero
 
                 runComputeShader(device, MouseClickChange_uniformBuffer, MouseClickChange_uniforms, MouseClickChange_Pipeline, MouseClickChange_BindGroup, calc_constants.DispatchX, calc_constants.DispatchY);  // update depth/friction based on mouse click
@@ -1678,31 +1724,32 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                     runCopyTextures(device, calc_constants, txtemp_MouseClick, txDesignComponents)
                     runCopyTextures(device, calc_constants, txtemp_MouseClick2, txBottomFriction)
                 }
+                }
             }
             else if (calc_constants.click_update == 2 && calc_constants.viewType == 2)
             {
-                Render_view.setFloat32(56, calc_constants.rotationAngle_xy, true);          // f32  
-                Render_view.setFloat32(60, calc_constants.shift_x, true);          // f32  
-                Render_view.setFloat32(64, calc_constants.shift_y, true);          // f32  
-                Render_view.setFloat32(68, calc_constants.forward, true);          // f32  
+                Render_view.setFloat32(56, calc_constants.rotationAngle_xy, true);          // f32
+                Render_view.setFloat32(60, calc_constants.shift_x, true);          // f32
+                Render_view.setFloat32(64, calc_constants.shift_y, true);          // f32
+                Render_view.setFloat32(68, calc_constants.forward, true);          // f32
             //    console.log("Updating view in Explorer Mode" )
             }
-            
+
             calc_constants.click_update = -1;
         }
-        
+
 
         // add impluse or disturbance
         if(calc_constants.add_Disturbance > 0) {
             AddDisturbance_view.setInt32(16, calc_constants.disturbanceType, true);             // f32
             AddDisturbance_view.setFloat32(20, calc_constants.disturbanceXpos, true);             // f32
             AddDisturbance_view.setFloat32(24, calc_constants.disturbanceYpos, true);             // f32
-            AddDisturbance_view.setFloat32(28, calc_constants.disturbanceCrestamp, true);             // f32  
-            AddDisturbance_view.setFloat32(32, calc_constants.disturbanceDir, true);             // f32  
-            AddDisturbance_view.setFloat32(36, calc_constants.disturbanceWidth, true);             // f32  
-            AddDisturbance_view.setFloat32(40, calc_constants.disturbanceLength, true);             // f32  
-            AddDisturbance_view.setFloat32(44, calc_constants.disturbanceDip, true);             // f32  
-            AddDisturbance_view.setFloat32(48, calc_constants.disturbanceRake, true);             // f32  
+            AddDisturbance_view.setFloat32(28, calc_constants.disturbanceCrestamp, true);             // f32
+            AddDisturbance_view.setFloat32(32, calc_constants.disturbanceDir, true);             // f32
+            AddDisturbance_view.setFloat32(36, calc_constants.disturbanceWidth, true);             // f32
+            AddDisturbance_view.setFloat32(40, calc_constants.disturbanceLength, true);             // f32
+            AddDisturbance_view.setFloat32(44, calc_constants.disturbanceDip, true);             // f32
+            AddDisturbance_view.setFloat32(48, calc_constants.disturbanceRake, true);             // f32
 
             runComputeShader(device, AddDisturbance_uniformBuffer, AddDisturbance_uniforms, AddDisturbance_Pipeline, AddDisturbance_BindGroup, calc_constants.DispatchX, calc_constants.DispatchY);  // add impulse
             runCopyTextures(device, calc_constants, txtemp_AddDisturbance, txstateUVstar)
@@ -1711,7 +1758,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
         }
 
 
-         // loop through the compute shaders "render_step" times.  
+         // loop through the compute shaders "render_step" times.
         var commandEncoder;  // init the encoder
         var commandEncoderStack;  // init the encoder for stacking
         if (calc_constants.simPause < 0) {// do not run compute loop when > 0, when the simulation is paused {
@@ -1752,7 +1799,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                     runComputeShader_EncStack(device, commandEncoderStack, PassBreaking_uniformBuffer, PassBreaking_uniforms, PassBreaking_Pipeline, PassBreaking_BindGroup, calc_constants.DispatchX, calc_constants.DispatchY);
                     runCopyTextures_EncStack(commandEncoderStack, calc_constants, txtemp_Breaking, txBreaking)
                 }
-                
+
                 // break here to submit the command encoder stack
                 device.queue.submit([commandEncoderStack.finish()]);
 
@@ -1796,7 +1843,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                 runCopyTextures_EncStack(commandEncoderStack, calc_constants, txtemp_Breaking, txBreaking)
                 if(calc_constants.useSedTransModel == 1){
                     runCopyTextures_EncStack(commandEncoderStack, calc_constants, txtemp_boundary_Sed, txNewState_Sed)
-                }   
+                }
 
                 if (calc_constants.NLSW_or_Bous == 2) {
                     // COULWAVE Model - need to update nonlinear tridaig coefficents before running tridiag solver
@@ -1832,11 +1879,11 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                 if(calc_constants.disturbanceType == 5 && total_time <= 1.0e5 * calc_constants.dt) { // only add disturbance for first 100,000 time steps, to save some work
 
                     runComputeShader_EncStack(device, commandEncoderStack, AddDisturbance_uniformBuffer, AddDisturbance_uniforms, AddDisturbance_Pipeline, AddDisturbance_BindGroup, calc_constants.DispatchX, calc_constants.DispatchY);  // add impulse
-                    runCopyTextures_EncStack(commandEncoderStack, calc_constants, txtemp_bottom, txBottom) 
+                    runCopyTextures_EncStack(commandEncoderStack, calc_constants, txtemp_bottom, txBottom)
                     runComputeShader_EncStack(device, commandEncoderStack, Updateneardry_uniformBuffer, Updateneardry_uniforms, Updateneardry_Pipeline, Updateneardry_BindGroup, calc_constants.DispatchX, calc_constants.DispatchY);  //need to update neardry
                     runCopyTextures_EncStack(commandEncoderStack, calc_constants, txtemp_bottom, txBottom)
                     runComputeShader_EncStack(device, commandEncoderStack, UpdateTrid_uniformBuffer, UpdateTrid_uniforms, UpdateTrid_Pipeline, UpdateTrid_BindGroup, calc_constants.DispatchX, calc_constants.DispatchY);  //need to update tridiagonal coefficients due to change inn depth
-                        
+
                     // copy the initial bathy into a seperate texture
                     if (frame_count == 0) {
                         runCopyTextures_EncStack(commandEncoderStack, calc_constants, txBottom, txBottomInitial)
@@ -1844,22 +1891,22 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
 
                 }
 
-                // submit encoder stack 
+                // submit encoder stack
                 device.queue.submit([commandEncoderStack.finish()]);
 
                 if (calc_constants.timeScheme == 2)  // only called when using Predictor+Corrector method.  Adding corrector allows for a time step twice as large (also adds twice the computation) and provides a more accurate solution
                 {
                     // set buffers here so that command encoder stack can be maximized for corrector step
                     PassBreaking_view.setFloat32(36, total_time, true);
-                    
+
                     // re-init command encoder for corrector step
                     commandEncoderStack = device.createCommandEncoder();
-                    
+
                     // put txNewState into txState for the corrector equation, so gradients use the predicted values
                     runCopyTextures_EncStack(commandEncoderStack, calc_constants, txNewState, txState)
                     if(calc_constants.useSedTransModel == 1){
                         runCopyTextures_EncStack(commandEncoderStack, calc_constants, txNewState_Sed, txState_Sed)
-                    }                       
+                    }
 
                     // Pass0
                     runComputeShader_EncStack(device, commandEncoderStack, Pass0_uniformBuffer, Pass0_uniforms, Pass0_Pipeline, Pass0_BindGroup, calc_constants.DispatchX, calc_constants.DispatchY);
@@ -1880,7 +1927,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                         runComputeShader_EncStack(device, commandEncoderStack, PassBreaking_uniformBuffer, PassBreaking_uniforms, PassBreaking_Pipeline, PassBreaking_BindGroup, calc_constants.DispatchX, calc_constants.DispatchY);
                         runCopyTextures_EncStack(commandEncoderStack, calc_constants, txtemp_Breaking, txBreaking)
                     }
-                    
+
                     // submit encoder stack for corrector step before breaking and Pass3
                     device.queue.submit([commandEncoderStack.finish()]);
 
@@ -1920,7 +1967,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                     runCopyTextures_EncStack(commandEncoderStack, calc_constants, txtemp_Breaking, txBreaking)
                     if(calc_constants.useSedTransModel == 1){
                         runCopyTextures_EncStack(commandEncoderStack, calc_constants, txtemp_boundary_Sed, txNewState_Sed)
-                    }                    
+                    }
 
                     if (calc_constants.NLSW_or_Bous == 2) {
                         // COULWAVE Model - need to update nonlinear tridaig coefficents before running tridiag solver
@@ -1981,7 +2028,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                 // Copy future_ocean_texture back to ocean_texture
                 runCopyTextures_EncStack(commandEncoderStack, calc_constants, txNewState, txState)
                 runCopyTextures_EncStack(commandEncoderStack, calc_constants, current_stateUVstar, txstateUVstar)
-                
+
                 // shift/Copy SedTrans
                 if(calc_constants.useSedTransModel == 1){
                     runCopyTextures_EncStack(commandEncoderStack, calc_constants, oldGradients_Sed, oldOldGradients_Sed)
@@ -1995,7 +2042,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                 runComputeShader_EncStack(device, commandEncoderStack, Pass1_uniformBuffer, Pass1_uniforms, Pass1_Pipeline, Pass1_BindGroup, calc_constants.DispatchX, calc_constants.DispatchY);
                 //CalcMeans_view.setInt32(0, calc_constants.n_time_steps_means, true);          // i32 moved above
                 runComputeShader_EncStack(device, commandEncoderStack, CalcMeans_uniformBuffer, CalcMeans_uniforms, CalcMeans_Pipeline, CalcMeans_BindGroup, calc_constants.DispatchX, calc_constants.DispatchY);
-                
+
                 // Stack command encoder for copy operations
                 runCopyTextures_EncStack(commandEncoderStack, calc_constants, txtemp_Means, txMeans)
                 runCopyTextures_EncStack(commandEncoderStack, calc_constants, txtemp_Means_Speed, txMeans_Speed)
@@ -2005,7 +2052,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                 //CalcWaveHeight_view.setInt32(0, calc_constants.n_time_steps_waveheight, true);          // i32 moved above
                 runComputeShader_EncStack(device, commandEncoderStack, CalcWaveHeight_uniformBuffer, CalcWaveHeight_uniforms, CalcWaveHeight_Pipeline, CalcWaveHeight_BindGroup, calc_constants.DispatchX, calc_constants.DispatchY);
                 runCopyTextures_EncStack(commandEncoderStack, calc_constants, txtemp_WaveHeight, txWaveHeight)
-                
+
                 // submit encoder stack for copy operations after corrector step
                 device.queue.submit([commandEncoderStack.finish()]);
 
@@ -2014,20 +2061,56 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
 
         // copy eta and bottom data to the f16 texture for filtered rendering
         runComputeShader(device, Copytxf32_txf16_uniformBuffer, Copytxf32_txf16_uniforms, Copytxf32_txf16_Pipeline, Copytxf32_txf16_BindGroup, calc_constants.DispatchX, calc_constants.DispatchY);
-             
+
+        syncLagrangianToCalcConstants();
+        const Lrun = getLagrangianState();
+
+        // Lagrangian passive buoys: upload clicks, then Ito-step with live (u,v) and diffusivity K
+        if (Lrun.needUpload == 1) {
+            copyParticleLocsToTexture(device, txParticles);
+        }
+        if (Lrun.particles.length > 0 && Lrun.evolve == 1 && calc_constants.simPause < 0) {
+            if (Lrun.lastTime <= 0.0) {
+                Lrun.lastTime = total_time;
+            }
+            const dt_p = total_time - Lrun.lastTime;
+            if (dt_p > 0.0) {
+                Lrun.frame += 1;
+                AdvectParticles_view.setFloat32(16, dt_p, true);
+                AdvectParticles_view.setFloat32(20, Lrun.K, true);
+                AdvectParticles_view.setInt32(24, Lrun.particles.length, true);
+                AdvectParticles_view.setInt32(28, 1, true);
+                AdvectParticles_view.setUint32(32, Lrun.frame, true);
+                const dispatchP = Math.max(1, Math.ceil(Lrun.particles.length / 64));
+                runComputeShader(device, AdvectParticles_uniformBuffer, AdvectParticles_uniforms, AdvectParticles_Pipeline, AdvectParticles_BindGroup, dispatchP, 1);
+                runCopyParticles(device, txtemp_Particles, txParticles, calc_constants.maxNumberOfParticles);
+                Lrun.lastTime = total_time;
+                readParticlePositions(device, txParticles, canvas);
+            } else {
+                updateDuckOverlay(canvas);
+            }
+        } else if (Lrun.particles.length > 0) {
+            updateDuckOverlay(canvas);
+        }
+        if (Lrun.particles.length > 0) {
+            runCopyParticles(device, txParticles, txTimeSeries_Locations, calc_constants.maxNumberOfParticles, calc_constants.maxNumberOfTimeSeries);
+        }
+
         // Define the settings for the render pass.
-        Render_view.setFloat32(116, total_time, true);             // f32  
+        Render_view.setFloat32(116, total_time, true);             // f32
+        Render_view.setInt32(184, Lrun.particles.length, true);             // i32
+        Render_view.setInt32(188, calc_constants.maxNumberOfTimeSeries, true);             // i32
         if (calc_constants.viewType == 1)
         {
             // turn back on colorbar
             calc_constants.CB_show = 1;
-            
+
             // Render QUAD
             Render_view.setInt32(84, calc_constants.CB_show, true);          // i32
             RenderPipeline = RenderPipeline_quad;
         }
         else if (calc_constants.viewType == 2)
-        {  
+        {
             // turn off colorbar
             calc_constants.CB_show = 0;
 
@@ -2069,7 +2152,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
         let grid_ratio = calc_constants.dx / calc_constants.dy;
         if (calc_constants.viewType == 1)
         {
-            
+
             // Set the render pipeline, bind group, and vertex buffer.
             RenderPass.setPipeline(RenderPipeline);
             RenderPass.setBindGroup(0, RenderBindGroup);
@@ -2080,10 +2163,10 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
             // Render QUAD
             RenderPass.setVertexBuffer(0, quadVertexBuffer);
             // Issue draw command to draw
-            RenderPass.draw(4);  // Draw the quad 
+            RenderPass.draw(4);  // Draw the quad
         }
         else if (calc_constants.viewType == 2)  // 3D / drone / walk-through perspective !
-        {  
+        {
           // ──────────────────────────────────────────────────────────────────────────────
             // ──────────────────────────────────────────────────────────────────────────────
             // FULL "Perspective + Model" setup
@@ -2103,7 +2186,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
             const P      = mat4.perspective(mat4.create(), fovY, aspect, nearZ, farZ);
 
             // ─────────────────────────────────────────────────────────────
-            // 3. Camera transformation 
+            // 3. Camera transformation
 
             // --- Use a persistent camera state ---
             // Get current state
@@ -2135,20 +2218,20 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
             const i1 = Math.min(i0 + 1, Nx - 1);
             const j1 = Math.min(j0 + 1, Ny - 1);
             const tx = x - i0,      ty = y - j0;
-              
+
             const z00 = bathy2D[i0][j0];
             const z10 = bathy2D[i1][j0];
             const z01 = bathy2D[i0][j1];
             const z11 = bathy2D[i1][j1];
             const zmax = Math.max(z00, Math.max(z10, Math.max(z01,z11)));
             const zmin = Math.min(z00, Math.min(z10, Math.min(z01,z11)));
-              
+
             // interpolate in x
             const z0 = z00*(1-tx) + z10*tx;
             const z1 = z01*(1-tx) + z11*tx;
             // then in y
             const groundZ = z0*(1-ty) + z1*ty;
-            
+
             const groundEyePosZ =  Math.max(0.0, groundZ) + calc_constants.renderZScale * (zmax - zmin + calc_constants.renderEyeHeight);
             if (calc_constants.renderLocktoGround == 1) {  // if locked to ground
                 camState.position[2] = groundEyePosZ;
@@ -2186,7 +2269,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
             // when pitch in degrees exceeds ±90°, flip up
             if (Math.abs(calc_constants.rotationAngle_xz) > 90) {
                 vec3.scale(up, up, -1);
-            }      
+            }
             vec3.normalize(up, up);
 
             // Apply delta movements correctly to camera state
@@ -2199,13 +2282,13 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                 deltaPanX * simDim
                 );
             }
-            
+
             // 2) PanY  → move forward/back in the horizontal (XY) plane
             if (deltaPanY !== 0) {
                 // project the pitched forward vector onto the XY plane
                 const horFwd = vec3.fromValues(forward[0], forward[1], 0);
                 vec3.normalize(horFwd, horFwd);
-            
+
                 if (calc_constants.renderLocktoGround == 1) {
                     vec3.scaleAndAdd(
                     camState.position,
@@ -2219,10 +2302,10 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                     camState.position,
                     forward,
                     deltaPanY * simDim
-                    );   
+                    );
                 }
             }
-            
+
             // 3) forward control → move along the full camera direction (including pitch)
             if (deltaForward !== 0 && calc_constants.renderLocktoGround == 0) {
                 vec3.scaleAndAdd(
@@ -2278,17 +2361,17 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
             skyView[12] = 0.0;
             skyView[13] = 0.0;
             skyView[14] = 0.0;
-            
+
             // Sky view‐proj (no translation)
             const viewProjSky = mat4.mul(mat4.create(), P, skyView);
-            
+
             // Invert & upload
             const invViewProjSky = mat4.invert(mat4.create(), viewProjSky);
 
             // ── draw skybox ─────────────────────
             RenderPass.setPipeline(SkyboxPipeline);
             RenderPass.setBindGroup(0, SkyboxBindGroup);
-            // Upload invViewProjSky to  uniform buffer before drawing  
+            // Upload invViewProjSky to  uniform buffer before drawing
             for (let i = 0; i < 16; ++i) {
                 Skybox_view.setFloat32(4*i, invViewProjSky[i], true);
             }
@@ -2309,8 +2392,8 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
             //}
             //Duck_view.setFloat32(128, camState.position[0], true);
             //Duck_view.setFloat32(132, camState.position[1], true);
-            //Duck_view.setFloat32(136, camState.position[2], true);     
-            //device.queue.writeBuffer(Duck_uniformBuffer, 0, Duck_uniforms);     
+            //Duck_view.setFloat32(136, camState.position[2], true);
+            //device.queue.writeBuffer(Duck_uniformBuffer, 0, Duck_uniforms);
             //RenderPass.setVertexBuffer(0, duck.vertexBuffers[0]);
             //RenderPass.setVertexBuffer(1, duck.vertexBuffers[1]);
             //RenderPass.setVertexBuffer(2, duck.vertexBuffers[2]);
@@ -2331,7 +2414,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                 mv.setFloat32(128, camState.position[0], true);
                 mv.setFloat32(132, camState.position[1], true);
                 mv.setFloat32(136, camState.position[2], true);
-                
+
                 // B) push that into *this* object's GPUBuffer
                 device.queue.writeBuffer(obj.uniformBuffer, 0, obj.uniforms);
 
@@ -2347,7 +2430,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
             RenderPass.setPipeline(RenderPipeline);
             RenderPass.setBindGroup(0, RenderBindGroup);
 
-            // Upload viewProj to  niform buffer before drawing          
+            // Upload viewProj to  niform buffer before drawing
             // write it to existing UBO (at offset 192…208…)
             for (let i = 0; i < 16; ++i) {
                 Render_view.setFloat32(192 + 4*i, viewProj[i], true);
@@ -2358,7 +2441,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
             // Render Vertex grid
             RenderPass.setVertexBuffer(0, gridVertexBuffer);
             // Issue draw command to draw
-            RenderPass.draw(numVertices);  // Draw the vertex grid  
+            RenderPass.draw(numVertices);  // Draw the vertex grid
         }
 
         // End the render pass after recording all its commands.
@@ -2418,8 +2501,8 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
 
         // for the tooltip & time series, extract pixel values
         if(calc_constants.updateTimeSeriesTx == 1 || calc_constants.chartDataUpdate == 1) {  // update the time series locations texture, and reset plot
-            copyTSlocsToTexture(calc_constants, device, txTimeSeries_Locations) 
-            frame_count_time_series = 0; 
+            copyTSlocsToTexture(calc_constants, device, txTimeSeries_Locations)
+            frame_count_time_series = 0;
             total_time_time_series = 0.0;
             calc_constants.updateTimeSeriesTx = 0;
         }
@@ -2430,20 +2513,19 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                 console.log('Reseting time series chart data, and saving time series to file')
                 downloadTimeSeriesData();
             }
-            frame_count_time_series = 0; 
+            frame_count_time_series = 0;
             total_time_time_series = 0.0;
         }
-        
+
         ExtractTimeSeries_view.setInt32(16, calc_constants.mouse_current_canvas_indX, true);             // i32
         ExtractTimeSeries_view.setInt32(20, calc_constants.mouse_current_canvas_indY, true);             // i32
         ExtractTimeSeries_view.setFloat32(24,  total_time_time_series, true);             // f32, total_time
-        runComputeShader(device, ExtractTimeSeries_uniformBuffer, ExtractTimeSeries_uniforms, ExtractTimeSeries_Pipeline, ExtractTimeSeries_BindGroup, calc_constants.NumberOfTimeSeries + 1, 1);  //extract tooltip and time series data into a 1D texture        
+        runComputeShader(device, ExtractTimeSeries_uniformBuffer, ExtractTimeSeries_uniforms, ExtractTimeSeries_Pipeline, ExtractTimeSeries_BindGroup, calc_constants.NumberOfTimeSeries + 1, 1);  //extract tooltip and time series data into a 1D texture
         readToolTipTextureData(device, txTimeSeries_Data, frame_count_time_series);  //  read the tooltip / time series data and place into variables
 
-        
         // store the current screen render as a texture, and then copy to a storage texture that will not be destroyed.  This is for creating jpgs, animations, only when not fullscreen
         if(calc_constants.full_screen == 0){
-            const current_render = context.getCurrentTexture();    
+            const current_render = context.getCurrentTexture();
 
             commandEncoder = device.createCommandEncoder();
 
@@ -2452,7 +2534,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                 { texture: txScreen },  //dst
                 { width: canvas.width, height: canvas.height, depthOrArrayLayers: 1 }
             );
-            device.queue.submit([commandEncoder.finish()]);            
+            device.queue.submit([commandEncoder.finish()]);
         }
         // end image store
 
@@ -2468,6 +2550,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
         displayCalcConstants(calc_constants, total_time_since_http_update);
         displaySimStatus(calc_constants, total_time, total_time_since_http_update);
         displayTimeSeriesLocations(calc_constants);
+        displayLagrangianParticles(calc_constants);
         displaySlideVolume(calc_constants);
 
         // create Animated Gif or jpg stack
@@ -2481,8 +2564,8 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
         let nframes = 80;
         if(calc_constants.create_animation == 2) {nframes = calc_constants.JPEGstack_frames;}
         if(calc_constants.create_animation > 0){
-            frame_animation = frame_animation + 1;            
-            
+            frame_animation = frame_animation + 1;
+
             let dt_inc = calc_constants.AnimGif_dt; // incrememnt store frames
             if(calc_constants.create_animation == 2){dt_inc = calc_constants.JPEGstack_dt;}
             let n_inc = Math.ceil(dt_inc / calc_constants.dt);
@@ -2520,7 +2603,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                 else if(calc_constants.create_animation == 2){
                     saveTextureSlicesAsImages(device, txAnimation, textureSize);
                 }
-               
+
                // reset render parameters back
                calc_constants.create_animation = 0;
                calc_constants.setRenderStep = 0;
@@ -2540,56 +2623,56 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
 
             } else if(calc_constants.which_surface_to_write == 1){  // HU
                 let filename = 'current_HU.bin';
-                downloadTextureData(device, txNewState, 2, filename, readbackBuffer);  
+                downloadTextureData(device, txNewState, 2, filename, readbackBuffer);
 
             } else if(calc_constants.which_surface_to_write == 2){  // HV
                 let filename = 'current_HV.bin';
-                downloadTextureData(device, txNewState, 3, filename, readbackBuffer);  
+                downloadTextureData(device, txNewState, 3, filename, readbackBuffer);
 
             } else if(calc_constants.which_surface_to_write == 3){  // eddy viscosity
                 let filename = 'current_eddyvisc.bin';
-                downloadTextureData(device, txBreaking, 2, filename, readbackBuffer);  
+                downloadTextureData(device, txBreaking, 2, filename, readbackBuffer);
 
             } else if(calc_constants.which_surface_to_write == 4){  // foam
                 let filename = 'current_tracer.bin';
-                downloadTextureData(device, txNewState, 4, filename, readbackBuffer);  
+                downloadTextureData(device, txNewState, 4, filename, readbackBuffer);
 
             } else if(calc_constants.which_surface_to_write == 5){  // Bathymetry/Topography
                 let filename = 'current_bathytopo.bin';
-                downloadTextureData(device, txBottom, 3, filename, readbackBuffer);  
+                downloadTextureData(device, txBottom, 3, filename, readbackBuffer);
 
-            } else if(calc_constants.which_surface_to_write == 6){  // Bottom Friction Map 
+            } else if(calc_constants.which_surface_to_write == 6){  // Bottom Friction Map
                 let filename = 'current_friction.bin';
-                downloadTextureData(device, txBottomFriction, 1, filename, readbackBuffer);  
+                downloadTextureData(device, txBottomFriction, 1, filename, readbackBuffer);
 
             } else if(calc_constants.which_surface_to_write == 7){  // Design Component Map
                 let filename = 'current_designcomponents.bin';
-                downloadTextureData(device, txDesignComponents, 1, filename, readbackBuffer);  
+                downloadTextureData(device, txDesignComponents, 1, filename, readbackBuffer);
 
             } else if(calc_constants.which_surface_to_write == 8){  // RMS Wave Height
                 let filename = 'current_Hrms.bin';
-                downloadTextureData(device, txWaveHeight, 4, filename,readbackBuffer);  
+                downloadTextureData(device, txWaveHeight, 4, filename,readbackBuffer);
 
             } else if(calc_constants.which_surface_to_write == 9){  // Significant Wave Height
                 let filename = 'current_Hs.bin';
-                downloadTextureData(device, txWaveHeight, 3, filename, readbackBuffer);  
+                downloadTextureData(device, txWaveHeight, 3, filename, readbackBuffer);
 
-            } else if(calc_constants.which_surface_to_write == 10){  // Max Free Surface Elev 
+            } else if(calc_constants.which_surface_to_write == 10){  // Max Free Surface Elev
                 let filename = 'current_FSmax.bin';
-                downloadTextureData(device, txMeans_Speed, 4, filename, readbackBuffer); 
+                downloadTextureData(device, txMeans_Speed, 4, filename, readbackBuffer);
 
-            } else if(calc_constants.which_surface_to_write == 11){  // Mean Free Surface Elev 
+            } else if(calc_constants.which_surface_to_write == 11){  // Mean Free Surface Elev
                 let filename = 'current_FSmean.bin';
-                downloadTextureData(device, txMeans, 1, filename, readbackBuffer);  
+                downloadTextureData(device, txMeans, 1, filename, readbackBuffer);
 
             } else if(calc_constants.which_surface_to_write == 12){  // Mean Fluid Flux [E-W]
                 let filename = 'current_Umean.bin';
-                downloadTextureData(device, txMeans, 2, filename, readbackBuffer);  
+                downloadTextureData(device, txMeans, 2, filename, readbackBuffer);
 
             } else if(calc_constants.which_surface_to_write == 13){  // Mean Fluid Flux [N-S]
                 let filename = 'current_Vmean.bin';
-                downloadTextureData(device, txMeans, 3, filename, readbackBuffer);  
-            }   
+                downloadTextureData(device, txMeans, 3, filename, readbackBuffer);
+            }
 
             calc_constants.write_individual_surface = 0;  // reset
         }
@@ -2607,24 +2690,24 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
             console.log('Trigger write - Reseting wave height surfaces')
             calc_constants.n_time_steps_waveheight = 0;  // reset wave height counter - compute shader will automatically reset
             calc_constants.trigger_writeWaveHeight = 3;  // step up trigger index
-        }        
+        }
 
         // write individual surfaces to file
         if(calc_constants.trigger_writeWaveHeight == 3 && total_time >= calc_constants.trigger_writeWaveHeight_time){
             console.log('Trigger write - Writing wave height and other surfaces to file')
-            
+
             var filename = `dx.txt`;
             await saveSingleValueToFile(calc_constants.dx,filename);
-    
+
             filename = `dy.txt`;
             await saveSingleValueToFile(calc_constants.dy,filename);
-    
+
             filename = `nx.txt`;
             await saveSingleValueToFile(calc_constants.WIDTH,filename);
-    
+
             filename = `ny.txt`;
             await saveSingleValueToFile(calc_constants.HEIGHT,filename);
-            
+
             const files = [
                 { tx: txBottom,       ch: 3, filename: 'current_bathytopo.bin' },
                 { tx: txWaveHeight,   ch: 4, filename: 'current_Hrms.bin'  },
@@ -2639,7 +2722,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                 { tx: txMeans_Momflux,ch: 4, filename: 'current_Vorticitymean.bin'},
                 { tx: txBotChange_Sed,ch: 3, filename: 'current_SedTransDepthChange.bin'},
             ];
-            
+
             for (const {tx, ch, filename} of files) {
                 await downloadTextureData(device, tx, ch, filename, readbackBuffer);
                 // give the browser a breather before the next one
@@ -2651,40 +2734,40 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
             // write complete file
             const text_complete = "Simulation Completed";
             const blob_complete = new Blob([text_complete], { type: "text/plain" });
-          
+
             // Create a temporary URL for the Blob
             const url_complete = URL.createObjectURL(blob_complete);
-          
+
             // Create a temporary anchor element and trigger the download
             const a_complete = document.createElement("a");
             a_complete.href = url_complete;
             a_complete.download = "completed.txt";
             document.body.appendChild(a_complete);
             a_complete.click();
-          
+
             // Cleanup: remove the anchor and revoke the Blob URL
             document.body.removeChild(a_complete);
             URL.revokeObjectURL(url_complete);
         }
 
         // when in trigger mode, write current time to file
-        if(calc_constants.trigger_writeWaveHeight > 0 && frame_count % 100 * calc_constants.render_step == 0) { 
+        if(calc_constants.trigger_writeWaveHeight > 0 && frame_count % 100 * calc_constants.render_step == 0) {
             const text_current_time = String(total_time); // Convert the float to a string
             const blob_current_time = new Blob([text_current_time], { type: "text/plain" });
-            
+
             // Create a temporary URL for the Blob
             const url_current_time = URL.createObjectURL(blob_current_time);
-            
+
             // Create a temporary anchor element and trigger the download
             const a_current_time = document.createElement("a");
             a_current_time.href = url_current_time;
             a_current_time.download = "current_time.txt";
             document.body.appendChild(a_current_time);
             a_current_time.click();
-            
+
             // Cleanup: remove the anchor and revoke the Blob URL
             document.body.removeChild(a_current_time);
-            URL.revokeObjectURL(url_current_time);            
+            URL.revokeObjectURL(url_current_time);
         }
 
         // write surface data stack to file
@@ -2704,7 +2787,7 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
             dt_since_last_write = dt_since_last_write + calc_constants.dt * calc_constants.render_step;
 
             if(dt_since_last_write >= calc_constants.dt_writesurface) {
-                
+
                 try {
                     frame_count_output = frame_count_output + 1;
                     console.log('Writing 2D surface data to file at time (s) ', total_time, ' with increment(s) ', dt_since_last_write);
@@ -2713,11 +2796,11 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
                 } catch (error) {
                     console.error("Failed to write surface data:", error);
                 }
-                
+
             }
-            
+
         }
-        
+
         requestAnimationFrame(frame);  // Call the next frame, restarts the function
 
     }
@@ -2737,10 +2820,78 @@ async function initializeWebGPUApp(configContent, bathymetryContent, waveContent
 
 // All the functions below this are for web page UI - this is also where the wave simulation is started
 document.addEventListener('DOMContentLoaded', function () {
+    console.warn('[LAG] DOMContentLoaded fired');
     // Get a reference to your canvas element.
     var canvas = document.getElementById('webgpuCanvas');
 
     ConsoleLogRedirection();
+
+    function bindLagrangianButtons() {
+        const lagrangianStartBtn = document.getElementById('lagrangian-start-button');
+        const lagrangianFinishBtn = document.getElementById('lagrangian-finish-button');
+        const lagrangianClearBtn = document.getElementById('lagrangian-clear-button');
+        const lagrangianKInput = document.getElementById('lagrangianK-input');
+        const lagrangianKButton = document.getElementById('lagrangianK-button');
+        console.warn('[LAG] bindLagrangianButtons', {
+            readyState: document.readyState,
+            start: !!lagrangianStartBtn,
+            finish: !!lagrangianFinishBtn,
+            clear: !!lagrangianClearBtn,
+            canvas: !!canvas,
+        });
+        if (lagrangianKInput) {
+            lagrangianKInput.value = calc_constants.lagrangianK;
+        }
+        if (lagrangianStartBtn) {
+            lagrangianStartBtn.onclick = function (event) {
+                console.warn('[LAG] Start button click');
+                if (event) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                }
+                startLagrangianPlacement(canvas);
+            };
+        } else {
+            console.warn('[LAG] Start button NOT FOUND');
+        }
+        if (lagrangianFinishBtn) {
+            lagrangianFinishBtn.onclick = function (event) {
+                console.warn('[LAG] Finish button click');
+                if (event) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                }
+                finishLagrangianPlacement(canvas);
+            };
+        } else {
+            console.warn('[LAG] Finish button NOT FOUND');
+        }
+        if (lagrangianClearBtn) {
+            lagrangianClearBtn.onclick = function (event) {
+                console.warn('[LAG] Clear button click');
+                if (event) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                }
+                clearLagrangianParticles();
+                updateDuckOverlay(canvas);
+            };
+        }
+        if (lagrangianKButton && lagrangianKInput) {
+            lagrangianKButton.onclick = function () {
+                const kVal = parseFloat(lagrangianKInput.value);
+                console.warn('[LAG] K update click', kVal);
+                if (!Number.isNaN(kVal) && kVal >= 0) {
+                    getLagrangianState().K = kVal;
+                    syncLagrangianToCalcConstants();
+                    updateLagrangianStatus();
+                }
+            };
+        }
+        ensureParticleOverlay(canvas);
+        updateLagrangianStatus();
+    }
+    bindLagrangianButtons();
 
     // Logic to make sure that only one panel can be maximized at a time
     // Turns out this is fairly complex.  Also, we store which panel is maximized
@@ -2750,7 +2901,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // Function to initialize and log the state of all panels, and enforce maximization rules
     function initializeAndManagePanels() {
         const panels = document.querySelectorAll('#horizontalbar .custom-window');
-        
+
         // Initialize the array with zeros based on the number of panels
         panels.forEach((panel, index) => {
             maximizedCounts[index] = 0; // Initialize tracking array
@@ -2773,7 +2924,7 @@ document.addEventListener('DOMContentLoaded', function () {
         panels.forEach((panel, index) => {
             const content = panel.querySelector('.window-content');
             const isMaximized = window.getComputedStyle(content).display !== 'none';
-            
+
             if (isMaximized) {
                 maximizedCounts[index] += 1;  // Increment count for maximized panels
             } else {
@@ -2787,11 +2938,15 @@ document.addEventListener('DOMContentLoaded', function () {
             } else if(maximizedCounts[index] == 1) {
                 calc_constants.whichPanelisOpen = index;
                 console.log(`Changing calc_constants.whichPanelisOpen to `, calc_constants.whichPanelisOpen );
+                if (panel.id === 'particles-container') {
+                    const L = getLagrangianState();
+                    console.warn('[LAG] particles panel opened. Start/Finish are manual. placing=', L.placing, 'evolve=', L.evolve);
+                }
             }
 
             // Update button label according to the current state
             updateButtonLabel(panel, window.getComputedStyle(content).display !== 'none');
-        
+
         });
     }
 
@@ -2851,6 +3006,27 @@ document.addEventListener('DOMContentLoaded', function () {
         if (event.button === 0 && calc_constants.viewType == 1) { // Left mouse button, Design mode
             leftMouseIsDown = true;
             handleMouseEvent(event);  // Handle the initial click
+            const placingNow = isPlacingLagrangian();
+            console.warn('[LAG] canvas pointerdown', {
+                button: event.button,
+                viewType: calc_constants.viewType,
+                placing: placingNow,
+                n: getLagrangianState().particles.length,
+                device: !!device,
+                txParticlesGPU: !!txParticlesGPU,
+            });
+            if (placingNow) {
+                const bounds = canvas.getBoundingClientRect();
+                const nx = (event.clientX - bounds.left) / Math.max(bounds.width, 1e-6);
+                const ny = 1.0 - (event.clientY - bounds.top) / Math.max(bounds.height, 1e-6);
+                const x_m = nx * calc_constants.WIDTH * calc_constants.dx;
+                const y_m = ny * calc_constants.HEIGHT * calc_constants.dy;
+                addParticleAtMeters(x_m, y_m);
+                if (device && txParticlesGPU) {
+                    copyParticleLocsToTexture(device, txParticlesGPU);
+                }
+                updateDuckOverlay(canvas);
+            }
         } else if (event.button === 0 && calc_constants.viewType == 2) { // Left mouse button, Explorer mode
             leftMouseIsDown = true;
             lastMouseX_left = event.clientX;
@@ -2936,7 +3112,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // keyboard interactions
     // Event listener for keydown - to handle arrow keys for shifting
     document.addEventListener('keydown', function (event) {
-        const shiftAmount = 0.001; // Change this value to shift by more or less  
+        const shiftAmount = 0.001; // Change this value to shift by more or less
         calc_constants.click_update = 2;
         switch (event.key) {
             case 'a': // 'A' key for left
@@ -3094,33 +3270,33 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // tooltip hover box near mouse point to display information
     const tooltip = document.getElementById('tooltip');
-    
+
     let x_position = 0.0;
     let y_position = 0.0;
     canvas.addEventListener('mousemove', async (event) => {
         const bounds = canvas.getBoundingClientRect(); // Get the bounding rectangle of the canvas
-    
+
         // Calculate coordinates relative to the canvas
         const x = event.clientX;
         const y = event.clientY;
-        
+
         // Normalize the coordinates to [0, 1]
         const canvas_width = bounds.right - bounds.left;
         const canvas_height = bounds.bottom - bounds.top;
         const normalizedX = (x - bounds.left) / canvas_width; //normalizedX;
         const normalizedY = 1.0 - (y - bounds.top) / canvas_height; //normalizedY;
-        
+
         // Update your constants for WebGPU
         //calc_constants.mouse_current_canvas_positionX = normalizedX;
         //calc_constants.mouse_current_canvas_positionY = normalizedY;
-        
+
         calc_constants.mouse_current_canvas_indX = Math.round(normalizedX * calc_constants.WIDTH);
         calc_constants.mouse_current_canvas_indY = Math.round(normalizedY * calc_constants.HEIGHT);
 
         // Use WebGPU to read the data at (canvasX, canvasY)
         x_position = normalizedX * calc_constants.WIDTH * calc_constants.dx;
         y_position = normalizedY * calc_constants.HEIGHT * calc_constants.dy;
-     
+
         // Adjust tooltip position considering the page scroll
         tooltip.style.display = 'block';
         tooltip.style.left = `${x + window.scrollX }px`; // Adjusted for page scroll
@@ -3130,14 +3306,14 @@ document.addEventListener('DOMContentLoaded', function () {
         tooltip.style.padding = '8px';
         tooltip.style.borderRadius = '4px';
     });
-    
+
     function updateTooltip() {
         // Assuming x_position and y_position are updated elsewhere in your code and accessible here
-        
-        if (calc_constants.viewType == 1){ 
+
+        if (calc_constants.viewType == 1){
             if (calc_constants.river_sim == 1){
                 let flow_depth = calc_constants.tooltipVal_eta - calc_constants.tooltipVal_bottom;
-                tooltip.innerHTML = `x-coordinate (m): ${x_position.toFixed(2)}<br>y-coordinate (m): ${y_position.toFixed(2)}<br>bottom elevation (m): ${calc_constants.tooltipVal_bottom.toFixed(2)} <br>friction factor: ${calc_constants.tooltipVal_friction.toFixed(3)}<br>surface elevation (m): ${calc_constants.tooltipVal_eta.toFixed(2)} <br>flow depth (m): ${flow_depth.toFixed(2)} <br>flow speed (m/s): ${calc_constants.tooltipVal_Hs.toFixed(2)}`;    
+                tooltip.innerHTML = `x-coordinate (m): ${x_position.toFixed(2)}<br>y-coordinate (m): ${y_position.toFixed(2)}<br>bottom elevation (m): ${calc_constants.tooltipVal_bottom.toFixed(2)} <br>friction factor: ${calc_constants.tooltipVal_friction.toFixed(3)}<br>surface elevation (m): ${calc_constants.tooltipVal_eta.toFixed(2)} <br>flow depth (m): ${flow_depth.toFixed(2)} <br>flow speed (m/s): ${calc_constants.tooltipVal_Hs.toFixed(2)}`;
             }
             else if (calc_constants.disturbanceType > 1) {
                 tooltip.innerHTML = `x-coordinate (m): ${x_position.toFixed(2)}<br>y-coordinate (m): ${y_position.toFixed(2)}<br>bathy/topo (m): ${calc_constants.tooltipVal_bottom.toFixed(2)} <br>friction factor: ${calc_constants.tooltipVal_friction.toFixed(3)}<br>surface elevation (m): ${calc_constants.tooltipVal_eta.toFixed(2)} <br>max free surface (m): ${calc_constants.tooltipVal_Hs.toFixed(2)}`;
@@ -3149,7 +3325,7 @@ document.addEventListener('DOMContentLoaded', function () {
             tooltip.innerHTML = ``;
         }
     }
-    
+
     // Set this function to be called every 100 milliseconds
     const updateInterval = 100; // Adjust the interval as needed
     setInterval(updateTooltip, updateInterval);
@@ -3390,8 +3566,8 @@ document.addEventListener('DOMContentLoaded', function () {
                 console.error(`Element with ID '${input}' not found.`);
             }
         });
-    } 
-    
+    }
+
     // update the ALL input and dropdown buttons with the current parameter value when any one button is pushed
     function updateAllUIElements() {
         // Update text input fields
@@ -3406,7 +3582,7 @@ document.addEventListener('DOMContentLoaded', function () {
             var selectElement = document.getElementById(action.input);
             selectElement.value = currentValue;
         });
-    }    
+    }
 
     // Parameters for each button/input pair which has some numerical input value, and an associated "Update" button
     const buttonActions = [
@@ -3462,7 +3638,7 @@ document.addEventListener('DOMContentLoaded', function () {
         { id: 'incident_wave_H-button', input: 'incident_wave_H-input', property: 'incident_wave_H' },
         { id: 'incident_wave_T-button', input: 'incident_wave_T-input', property: 'incident_wave_T' },
         { id: 'incident_wave_direction-button', input: 'incident_wave_direction-input', property: 'incident_wave_direction' },
-    ];         
+    ];
 
     // Specify the inputs for the drop-down menus
     const button_dropdown_Actions = [
@@ -3506,12 +3682,12 @@ document.addEventListener('DOMContentLoaded', function () {
     buttonActions.forEach(({ id, input, property }) => {
         const button = document.getElementById(id);
         const inputValue = document.getElementById(input);
-    
+
         if (button && inputValue) {
             button.addEventListener('click', function () {
                 const value = parseFloat(inputValue.value); // Assuming all values are floats; parse as appropriate
                 updateCalcConstants(property, value);
-                
+
                 // Call the function to update all UI elements
                 updateAllUIElements();
             });
@@ -3536,14 +3712,14 @@ document.addEventListener('DOMContentLoaded', function () {
     const fullscreenButton = document.getElementById('fullscreen-button');
     // Function to adjust canvas size
     function resizeCanvas() {
-        
+
         let grid_ratio = calc_constants.dx / calc_constants.dy;
         if (document.fullscreenElement) {
             const window_width = window.innerWidth;
             const window_height = window.innerHeight;
 
             // canvas_width_ratio and height will be updated at render time
-            
+
             canvas.width = window_width;
             canvas.height = window_height;
         } else {
@@ -3552,13 +3728,13 @@ document.addEventListener('DOMContentLoaded', function () {
                 canvas.width = Math.ceil(calc_constants.WIDTH/64*grid_ratio)*64;  // width needs to have a multiple of 256 bytes per row.  Data will have four channels (rgba), so mulitple os 256/4 = 64;
                 canvas.height = Math.round(calc_constants.HEIGHT * canvas.width / calc_constants.WIDTH / grid_ratio);
                 calc_constants.canvas_width_ratio = 1/grid_ratio;
-                calc_constants.canvas_height_ratio = 1.0; 
+                calc_constants.canvas_height_ratio = 1.0;
             }
             else {
                 canvas.width = Math.ceil(calc_constants.WIDTH/64)*64;  // width needs to have a multiple of 256 bytes per row.  Data will have four channels (rgba), so mulitple os 256/4 = 64;
                 canvas.height = Math.round(calc_constants.HEIGHT * canvas.width / calc_constants.WIDTH / grid_ratio);
                 calc_constants.canvas_width_ratio = grid_ratio;
-                calc_constants.canvas_height_ratio = 1.0; 
+                calc_constants.canvas_height_ratio = 1.0;
             }
         }
     }
@@ -3601,7 +3777,7 @@ document.addEventListener('DOMContentLoaded', function () {
             document.exitFullscreen().then(() => {
                 canvas.classList.remove('fullscreen'); // Remove the full-screen class
                 resizeCanvas(); // Resize the canvas back to normal dimensions
-                
+
             }).catch(err => {
                 console.log(`Error attempting to disable full-screen mode: ${err.message}`);
             });
@@ -3617,7 +3793,7 @@ document.addEventListener('DOMContentLoaded', function () {
             // The user has exited full screen
             canvas.classList.remove('fullscreen'); // Remove the full-screen class
             resizeCanvas(); // Resize the canvas back to normal dimensions
-            
+
             console.log("Exited full screen mode");
             updateCalcConstants('viewType', 1); // change to explorer mode
             calc_constants.click_update = 1;
@@ -3633,7 +3809,7 @@ document.addEventListener('DOMContentLoaded', function () {
             // Include any additional logic you want to perform when entering full screen
         }
         updateZoomListener(); // Ensure the listener state matches the new viewType, turns on/off scrolling over canvas
-    });  
+    });
 
 
     // Function to change the color of the label when a file is uploaded
@@ -3657,23 +3833,23 @@ document.addEventListener('DOMContentLoaded', function () {
             calc_constants.setRenderStep = 1;  // by setting to one, render step will not change
         }
         else {
-            calc_constants.setRenderStep = 0;  
+            calc_constants.setRenderStep = 0;
         }
     });
 
     // listener for overlay option change
     document.getElementById('GoogleMapOverlay-select').addEventListener('change', function () {
         calc_constants.OverlayUpdate = 1;  // triggers logic to update transforms for the two overlay options
-    });    
-    
+    });
+
     // if changing sea level, make sure surfaceToChange == 1 (bathy / topo)
     document.getElementById('changeSeaLevel-button').addEventListener('click', function () {
         calc_constants.click_update = 1; // trigger click update block so txBottom gets updated
         calc_constants.surfaceToChange = 1;  // by setting to one, will tell timesereies shader to run
         calc_constants.changeSeaLevel_delta = calc_constants.changeSeaLevel - calc_constants.changeSeaLevel_current;
-        calc_constants.changeSeaLevel_current = calc_constants.changeSeaLevel;        
+        calc_constants.changeSeaLevel_current = calc_constants.changeSeaLevel;
     });
-    
+
     // add time series listener, to update time series location texture changeXTimeSeries-button
     document.getElementById('changeXTimeSeries-button').addEventListener('click', function () {
         calc_constants.locationOfTimeSeries[calc_constants.changethisTimeSeries].xts = calc_constants.changeXTimeSeries;
@@ -3704,13 +3880,13 @@ document.addEventListener('DOMContentLoaded', function () {
     document.getElementById('downloadJPG-button').addEventListener('click', function () {
         saveRenderedImageAsJPEG(device, txScreen, canvas.width, canvas.height);
     });
-    
+
 
     // Create animated gif
     document.getElementById('createGIF-button').addEventListener('click', function () {
         calc_constants.create_animation = 1;  //triggers save animation logic
     });
-    
+
 
     // Save time stack of jpgs
     document.getElementById('createJPGstack-button').addEventListener('click', function () {
@@ -3872,7 +4048,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // Ensure to bind this function to your button's 'click' event in the HTML or here in the JS.
     document.getElementById('start-simulation-btn').addEventListener('click', function () {  // running with user loaded files
         calc_constants.run_example = -1;  // reset back to no example (for case when loading files after running example)
-        startSimulation(); 
+        startSimulation();
         const delay = 5000; // Time in milliseconds (1000 ms = 1 second)
         setTimeout(updateAllUIElements, delay);
     });
@@ -3933,25 +4109,25 @@ document.addEventListener('DOMContentLoaded', function () {
         var hardbottomFile = document.getElementById('hardbottomFile').files[0];
         var OverlayFile = document.getElementById('satimageFile').files[0];
         var modelFile = document.getElementById('modelFile').files[0];
-    
+
         // Check if the required files are not uploaded
         if (!configFile || !bathymetryFile) {
             alert("Please upload all the required files.");
             return;  // Stop here.
         }
-    
+
         // Create FileReader objects to read the content of the files
         var configReader = new FileReader();
         var bathymetryReader = new FileReader();
         var waveReader = new FileReader();
-    
+
         // Setup of the FileReader callbacks to handle the data after files are read
         configReader.onload = function (e) {
             var configContent = e.target.result;
-    
+
             bathymetryReader.onload = function (e) {
                 var bathymetryContent = e.target.result;
-    
+
                 // Check if a wave file was uploaded, otherwise load a default
                 if (!waveFile) {
                     // Load default wave file if none provided
@@ -3971,13 +4147,13 @@ document.addEventListener('DOMContentLoaded', function () {
                     waveReader.readAsText(waveFile);
                 }
             };
-    
+
             bathymetryReader.readAsText(bathymetryFile);
         };
-    
+
         configReader.readAsText(configFile);
     }
-    
+
     function startSimulationWithWave(configContent, bathymetryContent, waveContent, OverlayFile, modelFile, etaInitialConditionFile, frictionFile, hardbottomFile) {
         // Here you could do the actual simulation initialization
     //    console.log("Starting simulation with the following data:");
@@ -3985,13 +4161,13 @@ document.addEventListener('DOMContentLoaded', function () {
     //    console.log("Bathymetry:", bathymetryContent);
     //    console.log("Wave:", waveContent);
     //    console.log("Overlay:", OverlayFile);
-    
+
         // Initialize your WebGPU application here
         initializeWebGPUApp(configContent, bathymetryContent, waveContent, OverlayFile, modelFile, etaInitialConditionFile, frictionFile, hardbottomFile).catch(error => {
              console.error("Initialization failed:", error);
         });
     }
-    
+
 
 });
 // end web GUI code
@@ -4025,7 +4201,7 @@ function getBorderColor(index) {
 // Dynamically create datasets for each location
 let datasets = timeSeriesData.slice(0, calc_constants.NumberOfTimeSeries).map((location, index) => ({
   label: `Location ${index+1}`,
-  data: location.eta,
+  data: location.P, // Damyan Santander, cambie esto para ver velocidad
   borderColor: getBorderColor(index),
   borderWidth: 1,
   fill: false,
@@ -4057,7 +4233,7 @@ const timeseriesChart = new Chart(ctx, {
             y: {
                 title: {
                     display: true,
-                    text: 'Elevation (m)'
+                    text: 'u (m/s)' //Damyan Santander, tambien esto
                 },
                 beginAtZero: true
             }
@@ -4080,7 +4256,7 @@ async function updateChartData() {
         // Regenerate datasets for the new number of time series
         const newDatasets = timeSeriesData.slice(0, calc_constants.NumberOfTimeSeries).map((location, index) => ({
             label: `Location ${index+1}`,
-            data: location.eta,
+            data: location.P, //Damyan Santander, tambien esto
             borderColor: getBorderColor(index),
             borderWidth: 1,
             fill: false,
@@ -4095,7 +4271,7 @@ async function updateChartData() {
         // If no new datasets but data might have been updated
         timeseriesChart.data.datasets.forEach((dataset, index) => {
             if(timeSeriesData[index]) { // Ensure there's corresponding data
-                dataset.data = timeSeriesData[index].eta; // Update existing dataset data
+                dataset.data = timeSeriesData[index].P; // Update existing dataset data, Damyan Santander, tambien esto
             }
         });
     }
@@ -4116,4 +4292,3 @@ async function updateChartData() {
 
 // Set an interval to update the chart every second (1000 milliseconds)
 setInterval(updateChartData, 1000);
-

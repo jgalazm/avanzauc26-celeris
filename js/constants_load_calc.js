@@ -346,6 +346,17 @@ var calc_constants = {
     trigger_resetMeans_time: 0.0, // time to reset means
     trigger_resetWaveHeight_time: 0.0, // time to reset wave height
     trigger_writeWaveHeight_time: 0.0, // time to write wave height
+
+    // Lagrangian passive buoys (particle analog of the Eulerian tracer)
+    maxNumberOfParticles: 256,
+    NumberOfParticles: 0,
+    lagrangianPlacing: 0, // 1 = left-click adds a buoy
+    lagrangianEvolve: 0, // 1 = particles follow live velocity + random walk
+    lagrangianK: 0.1, // diffusivity K [m^2/s], analog of whiteWaterDispersion
+    lagrangianNeedUpload: 0, // upload CPU particle list to GPU
+    lagrangianLastTime: 0.0, // last time particles were advanced
+    lagrangianFrame: 0, // RNG seed counter
+    lagrangianParticles: [], // CPU cache of {x, y} in meters
 };
 
 // load the control file
@@ -400,6 +411,7 @@ async function init_sim_parameters(canvas, configContent) {
     calc_constants.one_over_dxdy = calc_constants.one_over_dx * calc_constants.one_over_dy;
     calc_constants.delta = Math.min(calc_constants.min_allowable_depth,calc_constants.base_depth / 5000.0);
     calc_constants.epsilon = Math.pow(calc_constants.delta, 2);
+    calc_constants.lagrangianK = calc_constants.whiteWaterDispersion;
     calc_constants.PI = Math.PI;
     calc_constants.boundary_epsilon = calc_constants.epsilon;
     calc_constants.boundary_nx = calc_constants.WIDTH - 1;
